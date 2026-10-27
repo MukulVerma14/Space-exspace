@@ -9,7 +9,10 @@
     "start": "node dist/server.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "migrate:up": "node-pg-migrate -m migrations up",
+    "migrate:down": "node-pg-migrate -m migrations down",
+    "migrate:redo": "node-pg-migrate -m migrations redo"
   },
   "dependencies": {
     "bcrypt": "^5.1.1",
