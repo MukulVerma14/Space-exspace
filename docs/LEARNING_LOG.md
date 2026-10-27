@@ -53,14 +53,14 @@ This document records every step of building the SPACE EXSPACE equipment and mat
 - **Risk**: If the client's network environment restricts Docker usage, running the local Windows PostgreSQL service or a cloud-hosted PostgreSQL instance will be required.
 
 ### 30-second explanation:
-> *"Before writing any business logic, we built a sturdy foundation. We set up an automated health check and strict startup checks. If a database password or key configuration is missing, the system catches it instantly and refuses to start with a clear error, instead of failing midway while a worker is trying to scan equipment in the yard."*
+> *\"Before writing any business logic, we built a sturdy foundation. We set up an automated health check and strict startup checks. If a database password or key configuration is missing, the system catches it instantly and refuses to start with a clear error, instead of failing midway while a worker is trying to scan equipment in the yard.\"*
 
 ### Likely questions:
-1. **"Why use Zod for environment variables instead of just reading `process.env`?"**
+1. **\"Why use Zod for environment variables instead of just reading `process.env`?\"**
    *Answer*: `process.env` provides raw strings without type guarantees or presence validation. If an essential variable like `DB_PASSWORD` or `JWT_SECRET` is missing or misspelled, raw `process.env` produces `undefined`, which silently propagates until a user makes a request that triggers an obscure runtime crash. Zod guarantees that if the server boots, every single required configuration is present and structurally valid.
-2. **"Why did you choose raw PostgreSQL with `pg` instead of an ORM like Prisma or TypeORM?"**
+2. **\"Why did you choose raw PostgreSQL with `pg` instead of an ORM like Prisma or TypeORM?\"**
    *Answer*: SPACE EXSPACE's business rules rely heavily on PostgreSQL-specific features: partial unique indexes (ensuring an asset is only rented once concurrently), CHECK constraints (disallowing negative stock or backwards dates), and SQL views for derived asset status. ORMs abstract away these exact primitives, making the system harder to tune, explain, and audit.
-3. **"What happens to inflight user requests if the server process receives a restart or shutdown signal?"**
+3. **\"What happens to inflight user requests if the server process receives a restart or shutdown signal?\"**
    *Answer*: We implemented a graceful shutdown handler listening for `SIGTERM` and `SIGINT`. It stops accepting new connections, allows active HTTP requests to complete, safely drains and closes the PostgreSQL connection pool, and only then exits.
 
 ### How to verify:
@@ -75,7 +75,7 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    ```
    *Expected Result*: Clean compilation with 0 errors.
 
----
+---\
 
 ## Step 1: Relational Database Migrations, 3NF Normalization, Constraints, and Derived View
 
@@ -142,7 +142,7 @@ This document records every step of building the SPACE EXSPACE equipment and mat
     - Supports both issued (customer) and received (supplier) invoices.
     - `invoice_lines` records `quantity`, `unit_id`, and `unit_price`. Lines from supplier invoices provide an automated, immutable record of material price fluctuations over time.
 14. **`stock_movements` (Single-Entry, Signed, Append-Only Ledger Pattern)**:
-    - Stock is NEVER stored as a static, mutable number in `items`.
+    - Stock is NEVER stored as a static, mutable number in `items``.
     - Every transaction (receipt from supplier, issue to workshop, adjustment, return) writes a signed row. Stock on hand is always `SUM(qty)`.
     - Database trigger ensures `SUM(qty)` can never drop below zero.
 
@@ -172,14 +172,14 @@ This document records every step of building the SPACE EXSPACE equipment and mat
 - **Risk**: If the fleet actually grows to 50,000+ items with millions of location log rows, querying `DISTINCT ON` on every request will eventually require a materialized view with refresh triggers. For the prototype and client demo, a standard view is optimal and free of cache-invalidation bugs.
 
 ### 30-second explanation:
-> *"Instead of having workers manually type whether a machine is 'available' or 'rented'—which causes human errors and double bookings—the database figures out the status automatically. If there is an active rental agreement that is confirmed or picked up, it is rented. If a repair ticket is open, it is under repair. If neither, it is available. And at the database level, it is physically impossible to rent a crane that is already checked out to another client."*
+> *\"Instead of having workers manually type whether a machine is 'available' or 'rented'—which causes human errors and double bookings—the database figures out the status automatically. If there is an active rental agreement that is confirmed or picked up, it is rented. If a repair ticket is open, it is under repair. If neither, it is available. And at the database level, it is physically impossible to rent a crane that is already checked out to another client.\"*
 
 ### Likely questions:
-1. **"Why didn't you put the equipment's current location and current status directly into the `equipment` table?"**
+1. **\"Why didn't you put the equipment's current location and current status directly into the `equipment` table?\"**\
    *Answer*: That would create two sources of truth. If someone updates the rental table or moves a crane, but the application crashes before updating the status column on the equipment table, the two records contradict each other. By deriving status and location dynamically from the audit logs and active rental contracts in `v_equipment_current`, the status is always mathematically guaranteed to match operational reality.
-2. **"Why do we store `applied_rate` on `rental_items` if we already have a `rates` table?"**
+2. **\"Why do we store `applied_rate` on `rental_items` if we already have a `rates` table?\"**\
    *Answer*: Standard rates change over time due to inflation or management decisions. If a customer signs a contract today for 1,200 SAR/day, and six months from now SPACE EXSPACE raises standard crane rates to 1,500 SAR/day, past rental contracts and customer invoices must still reflect the agreed 1,200 SAR. Storing `applied_rate` on the line item permanently seals the agreed financial transaction.
-3. **"How does the database prevent someone from issuing material when there isn't enough in the yard?"**
+3. **\"How does the database prevent someone from issuing material when there isn't enough in the yard?\"**\
    *Answer*: Materials are tracked in a single-entry, signed, append-only ledger (`stock_movements`), where stock on hand is `SUM(qty)`. We attached a PostgreSQL `BEFORE INSERT` trigger to `stock_movements`. If a technician attempts to issue 50 meters of conduit when only 20 are available, the trigger calculates the deficit and raises an immediate SQL error, rolling back the transaction before any bad data can be written.
 
 ### How to verify:
@@ -256,14 +256,14 @@ This document records every step of building the SPACE EXSPACE equipment and mat
 - **Risk**: Overlapping future calendar reservations are not prevented at the database level in this prototype; only concurrent active rentals are enforced via `returned_at IS NULL`.
 
 ### 30-second explanation:
-> *"We built an idempotent demo seed script that loads the entire system with realistic industrial data from Dammam—crane models from Tadano and Liebherr, generators from Cummins, fictional industrial client sites, and mock tax IDs. Best of all, it's completely safe: you can run it as many times as you want before a client meeting or interview, and it will never crash, duplicate records, or run in production by mistake."*
+> *\"We built an idempotent demo seed script that loads the entire system with realistic industrial data from Dammam—crane models from Tadano and Liebherr, generators from Cummins, fictional industrial client sites, and mock tax IDs. Best of all, it's completely safe: you can run it as many times as you want before a client meeting or interview, and it will never crash, duplicate records, or run in production by mistake.\"*
 
 ### Likely questions:
-1. **"What does 'idempotent' mean in the context of a seed script, and why is it crucial?"**
+1. **\"What does 'idempotent' mean in the context of a seed script, and why is it crucial?\"**\
    *Answer*: Idempotency means running the script multiple times produces the exact same clean database state without crashing with unique constraint errors or creating duplicate records. In client demos or test pipelines, developers frequently need to reset or refresh sample data; an idempotent script guarantees that running `npm run seed` is always 100% safe.
-2. **"Why do we see 7 rented items, 2 under repair, and 32 available in `v_equipment_current` when the seed script never wrote the word 'available' or 'rented' into an equipment table?"**
+2. **\"Why do we see 7 rented items, 2 under repair, and 32 available in `v_equipment_current` when the seed script never wrote the word 'available' or 'rented' into an equipment table?\"**\
    *Answer*: That demonstrates our derived state architecture. The seed script created 2 active rentals containing 5 and 2 items respectively (7 items currently rented), and 2 open repair tickets with no close date at the Dammam workshop. The view joined these immutable events and mathematically derived the status on the fly. No two sources of truth exist.
-3. **"Where are the passwords for the admin and staff users stored, and how does the server authenticate them?"**
+3. **\"Where are the passwords for the admin and staff users stored, and how does the server authenticate them?\"**\
    *Answer*: Plaintext passwords are never stored in the database. The seed script hashes them using `bcrypt` with 10 salt rounds and stores only the 60-character cryptographic hash in `users.password_hash`. When a user logs in, `bcrypt.compare` compares the supplied password with the hash. The dev passwords are documented solely in `README.md` for local testing.
 
 ### How to verify:
@@ -283,3 +283,93 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    npm --workspace=backend run lint
    ```
    *Expected Result*: `tsc --noEmit` exits with code 0.
+
+---
+
+## Step 3: Auth, RBAC, and Server-Side Rate Serialization
+
+### What we built:
+- **Authentication Types (`backend/src/types/auth.ts`)**: Defined `UserRole` (`'admin' | 'staff'`), `AuthenticatedUser`, and `JwtTokenPayload`, while augmenting the Express `Request` interface with an optional `user` attribute.
+- **Brute-Force Rate Limiting (`backend/src/middleware/rateLimiter.ts`)**: Throttles repeated failed requests to `POST /api/auth/login` to 10 attempts per 15 minutes per IP address (relaxed to 100 in test mode) using standard RFC headers.
+- **Authentication & RBAC Middleware (`backend/src/middleware/auth.ts`)**:
+  - `authenticate`: Validates the JWT Bearer token and verifies in PostgreSQL that the user account is active (`users.active = true`), enabling instant session revocation.
+  - `requireRole(...roles)`: Restricts routes to authorized roles, returning HTTP 403 Forbidden for unauthorized requests.
+- **Server-Side Financial Serializer (`backend/src/serializers/rateSerializer.ts`)**:
+  - Recursive sanitizer function `sanitizeFinancials(data, userRole)`.
+  - For any non-admin role (`staff`), it strips all sensitive financial and pricing keys (`applied_rate`, `rates`, `rate_card`, `amount`, `unit_price`, `unit_cost`, `subtotal`, `vat_amount`, `total`, `discount_note`, `cost`) directly from the JavaScript response object before serialization to JSON.
+- **Auth & Rates Controllers & Routes**:
+  - `POST /api/auth/login`: Zod-validated endpoint issuing an 8-hour JWT and user profile upon valid bcrypt password verification.
+  - `GET /api/auth/me`: Authenticated endpoint returning current user claims.
+  - `GET /api/rates`: Admin-only endpoint returning standard commercial rate cards (returns 403 Forbidden for staff).
+  - `GET /api/rates/rental-quote-demo`: Endpoint accessible by both roles, demonstrating server-side sanitization where staff can view operational assignment details but rates and discounts are physically omitted.
+- **Route Integration in App (`backend/src/app.ts`)**: Mounted `/api/auth` and `/api/rates`.
+- **Architectural Decision Record**: Documented in `docs/decisions/005-server-side-rate-serialization-and-jwt-auth.md`.
+- **Comprehensive Automated Test Suite (`backend/src/__tests__/auth.test.ts`)**: 14 tests verifying login, password comparison, deactivated account rejection, token validation, 403 role guards, server-side rate omission for staff, and unit tests on the serializer.
+
+### Why it exists:
+- **Client Requirement**: Two distinct roles: admin (full access incl. rates, rentals, invoices) and staff (scan + update location/status only) (**CONFIRMED**).
+- **Confidential Commercial Terms**: Rental standard rates and client-negotiated applied rates are proprietary business secrets; staff in the yard must never see commercial rates (**CONFIRMED**).
+- **Server-Enforced Security**: Client-side UI toggling (e.g. React `if (role === 'admin')`) is insecure because browser DevTools expose JSON network payloads. Defense in depth requires server-side serialization (**CONFIRMED**).
+
+### Why this way:
+- **Stateless JWTs with Database Active Verification + Server-Side Serializer**:
+  - *Alternative 1 Rejected (Frontend-only conditional rendering)*: A client-side `v-if` or `{isAdmin && <Rate />}` leaves sensitive financial data visible in Chrome DevTools Network payloads or React component props.
+  - *Alternative 2 Rejected (Separate database views for admin and staff)*: Creating `v_equipment_admin` and `v_equipment_staff` doubles view maintenance, risks synchronization drift, and clutters the database schema.
+  - *Alternative 3 Rejected (Stateful server sessions with Redis)*: Adds infrastructure complexity (a Redis cache server) without justification for an early prototype with ~145 equipment assets.
+  - *Alternative 4 Rejected (Pure stateless JWT without DB check)*: If a yard staff member is terminated or reassigned, a pure stateless JWT remains valid for its entire duration. By validating `users.active` on each request, deactivation takes effect instantly.
+
+### How it works:
+1. **Login Flow**:
+   - Client sends `POST /api/auth/login` with `{ email, password }`.
+   - `loginRateLimiter` ensures the IP has not exceeded the attempt threshold.
+   - `login` controller parses credentials with Zod and retrieves the user from PostgreSQL.
+   - `bcrypt.compare(password, user.password_hash)` verifies the password.
+   - If valid and `user.active === true`, the server signs an 8-hour JWT (`HS256`) containing `{ sub: user.id, email, role, name }` and returns it alongside the user profile.
+2. **Authenticated Request Flow**:
+   - Client sends an HTTP request with `Authorization: Bearer <token>`.
+   - `authenticate` middleware verifies the JWT cryptographic signature with `env.JWT_SECRET`.
+   - `authenticate` executes an indexed query `SELECT active FROM users WHERE id = $1` to guarantee the account has not been deactivated.
+   - Populates `req.user` with authenticated identity details and passes control to the next handler.
+3. **Role Guard Flow**:
+   - `requireRole('admin')` checks `req.user.role`.
+   - If `'staff'`, it aborts the request immediately with HTTP 403 Forbidden.
+4. **Server-Side Sanitization Flow**:
+   - When an endpoint returning equipment or rental contracts is accessed (e.g. `GET /api/rates/rental-quote-demo`), the controller queries the full relational record.
+   - Before calling `res.json()`, the data passes through `sanitizeFinancials(data, req.user.role)`.
+   - If `role !== 'admin'`, a recursive traversal strips all keys present in `RESTRICTED_RATE_KEYS`.
+   - The resulting JSON sent over the wire contains zero rate or monetary fields for staff users.
+
+### Concepts used:
+- **JWT (JSON Web Token)**: A compact, URL-safe means of representing signed claims between two parties.
+- **RBAC (Role-Based Access Control)**: Restricting system access to authorized users based on their assigned organizational role.
+- **Server-side serialization**: Filtering or restructuring data in the application backend before transmitting it over the network to prevent data leakage.
+- **Rate limiting**: Restricting the frequency of requests to an endpoint within a given time window to protect against denial-of-service and brute-force attacks.
+- **User enumeration prevention**: Returning uniform error messages (`Invalid email or password`) for both non-existent accounts and wrong passwords to prevent attackers from discovering valid usernames.
+
+### Risks and assumptions:
+- **Assumption**: 8-hour JWT token expiration matches standard yard shifts; users re-authenticate once per day.
+- **Risk**: If new financial columns (e.g., `deposit_amount`, `insurance_fee`) are added to future tables, they must be registered in `RESTRICTED_RATE_KEYS` to avoid unintentional exposure to staff.
+- **Performance Trade-off**: The database check in `authenticate` adds an indexed primary key lookup (~0.5ms) per authenticated request. This is intentional and necessary for immediate account revocation in this prototype.
+
+### 30-second explanation:
+> *\"We built a secure authentication system that gives office admins full control over equipment rates while physically preventing yard staff from seeing any financial figures. And unlike systems that just hide prices with CSS or JavaScript in the browser—where any curious worker can open browser Developer Tools and read the prices—our backend server strips all rates and prices from the network response before sending it. Even if staff inspect the raw network packets, the rates do not exist.\"*
+
+### Likely questions:
+1. **\"Why can't we just hide the rates in the React frontend using `{user.role === 'admin' && <RateDisplay />}`?\"**\
+   *Answer*: Hiding data in the frontend is cosmetic, not security. If the backend sends `{ asset_code: 'CRN-50-001', applied_rate: 1200.00 }`, anyone using Chrome DevTools or inspecting the network response can see the rate regardless of what the UI renders. True security requires server-side serialization so that sensitive financial keys are physically omitted before the JSON payload is transmitted over the network.
+2. **\"Why does your JWT authentication middleware query PostgreSQL on every request if JWTs are supposed to be stateless?\"**\
+   *Answer*: While JWTs carry claims statelessly, pure stateless tokens have a serious flaw: if an employee is terminated and their access needs to be revoked immediately, the token remains valid until it expires. By doing a single indexed primary key query (`WHERE id = $1 AND active = true`), we achieve instant account revocation without losing the simplicity of JWT tokens.
+3. **\"How does your system prevent brute-force password guessing attacks on the login endpoint?\"**\
+   *Answer*: We implemented IP-based rate limiting via `express-rate-limit` on `POST /api/auth/login`. It allows a maximum of 10 login attempts per 15-minute window per IP. If exceeded, it halts further attempts with HTTP 429 Too Many Requests. Additionally, login failures return an identical generic error message (`Invalid email or password`) to prevent username enumeration.
+
+### How to verify:
+1. Run all backend test suites:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 30 tests pass across `health.test.ts`, `schema.test.ts`, `seed.test.ts`, and `auth.test.ts`.
+2. Run TypeScript compilation check:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: `tsc --noEmit` exits with 0 errors.

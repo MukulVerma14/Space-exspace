@@ -4,6 +4,8 @@ import cors from 'cors';
 import { env } from './config/env.js';
 import { httpLogger } from './utils/logger.js';
 import { checkDbHealth } from './db/pool.js';
+import { authRouter } from './routes/authRoutes.js';
+import { ratesRouter } from './routes/ratesRoutes.js';
 
 export const app = express();
 
@@ -48,6 +50,12 @@ app.get('/health', async (_req, res) => {
   // Return 200 if DB is healthy, or 503 Service Unavailable if critical dependency is unreachable
   return res.status(isHealthy ? 200 : 503).json(responsePayload);
 });
+
+// Authentication routes
+app.use('/api/auth', authRouter);
+
+// Rates & commercial terms routes
+app.use('/api/rates', ratesRouter);
 
 // 404 handler for unknown routes
 app.use((_req, res) => {
