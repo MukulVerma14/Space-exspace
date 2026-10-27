@@ -54,15 +54,14 @@ CREATE TABLE rates (
 );
 
 -- 5. PARTIES (CUSTOMERS & SUPPLIERS)
--- WHY: Consolidated entity for external business organizations. Many companies in industrial hubs
--- act as both customer (renting cranes) and supplier (providing steel or transport).
+-- WHY: Consolidated entity for external business organizations.
 CREATE TABLE parties (
     id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     contact_person VARCHAR(255),
     phone VARCHAR(50),
     email VARCHAR(255),
-    vat_no VARCHAR(50), -- Saudi ZATCA 15-digit tax identification number
+    vat_no VARCHAR(50),
     address TEXT,
     notes TEXT,
     is_customer BOOLEAN NOT NULL DEFAULT false,
@@ -98,7 +97,7 @@ CREATE TABLE equipment (
 
 -- 8. LOCATION LOG (APPEND-ONLY AUDIT TRAIL)
 -- WHY: An asset's location is never mutated in place. Every physical scan or transfer creates an immutable log row.
--- This guarantees a tamper-proof chain of custody for insurance and operational audits.
+-- This guarantees a tamper-proof chain of custody for operational audits.
 CREATE TABLE location_log (
     id BIGSERIAL PRIMARY KEY,
     equipment_id INTEGER NOT NULL REFERENCES equipment(id) ON DELETE CASCADE,
@@ -160,6 +159,24 @@ CREATE TABLE rental_items (
 -- PARTIAL UNIQUE INDEX: One active rental per physical asset across the entire database!
 -- WHY: Guarantees at the database level that no asset can be actively rented to two clients simultaneously.
 CREATE UNIQUE INDEX uq_active_rental_item ON rental_items (equipment_id) WHERE returned_at IS NULL;
+
+-- CANCEL/RETURN TRIGGER: Automatically frees unreturned rental_items upon rental cancellation or return
+CREATE OR REPLACE FUNCTION on_rental_status_change()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.status IN ('cancelled', 'returned') AND OLD.status NOT IN ('cancelled', 'returned') THEN
+        UPDATE rental_items
+        SET returned_at = COALESCE(returned_at, CURRENT_TIMESTAMP)
+        WHERE rental_id = NEW.id AND returned_at IS NULL;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_rental_status_change
+AFTER UPDATE OF status ON rentals
+FOR EACH ROW
+EXECUTE FUNCTION on_rental_status_change();
 
 -- 12. MATERIALS INVENTORY: CATEGORIES & UNITS
 CREATE TABLE item_categories (
@@ -226,9 +243,9 @@ CREATE TABLE invoice_lines (
 
 CREATE INDEX idx_invoice_lines_item ON invoice_lines (item_id);
 
--- 16. STOCK MOVEMENTS (APPEND-ONLY INVENTORY LEDGER)
+-- 16. STOCK MOVEMENTS (SINGLE-ENTRY, SIGNED, APPEND-ONLY INVENTORY LEDGER)
 -- WHY: Stock on hand is NEVER an editable number. It is ALWAYS calculated dynamically as SUM(qty).
--- Receipts add positive qty; issues subtract negative qty. This creates an infallible financial audit trail.
+-- Receipts add positive qty; issues subtract negative qty. This creates an infallible audit trail.
 CREATE TABLE stock_movements (
     id BIGSERIAL PRIMARY KEY,
     item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE RESTRICT,
@@ -279,7 +296,7 @@ EXECUTE FUNCTION check_stock_movement_non_negative();
 -- Storing a mutable 'status' column creates two sources of truth that inevitably get out of sync.
 -- This view derives:
 --   - location from the most recent location_log row
---   - status = 'rented' if an open rental_item exists
+--   - status = 'rented' if an open rental_item exists AND rental status is 'confirmed' or 'picked_up'
 --   - status = 'under_repair' if an open maintenance row exists
 --   - status = 'available' otherwise
 CREATE OR REPLACE VIEW v_equipment_current AS
@@ -314,6 +331,7 @@ active_rental AS (
     JOIN parties p ON p.id = r.customer_id
     JOIN locations loc ON loc.id = r.site_id
     WHERE ri.returned_at IS NULL
+      AND r.status IN ('confirmed', 'picked_up')
 ),
 active_maint AS (
     SELECT
@@ -367,6 +385,8 @@ LEFT JOIN active_maint am ON am.equipment_id = e.id;
 -- Down Migration
 -- Drop objects in reverse dependency order
 DROP VIEW IF EXISTS v_equipment_current;
+DROP TRIGGER IF EXISTS trg_rental_status_change ON rentals;
+DROP FUNCTION IF EXISTS on_rental_status_change();
 DROP TRIGGER IF EXISTS trg_check_stock_movement_non_negative ON stock_movements;
 DROP FUNCTION IF EXISTS check_stock_movement_non_negative();
 DROP TABLE IF EXISTS stock_movements;

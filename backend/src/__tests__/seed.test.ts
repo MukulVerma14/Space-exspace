@@ -10,6 +10,16 @@ describe('Idempotent Database Seed Suite', () => {
     await expect(seedDatabase()).resolves.not.toThrow();
   });
 
+  it('refuses to seed when NODE_ENV is production', async () => {
+    const originalEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      await expect(seedDatabase()).rejects.toThrow(/strictly disabled in production mode/);
+    } finally {
+      process.env.NODE_ENV = originalEnv;
+    }
+  });
+
   it('creates the two required system users with valid bcrypt password hashes', async () => {
     const adminRes = await pool.query(`SELECT * FROM users WHERE email = 'admin@spaceexspace.com'`);
     expect(adminRes.rows.length).toBe(1);
@@ -28,7 +38,7 @@ describe('Idempotent Database Seed Suite', () => {
     expect(isStaffPasswordValid).toBe(true);
   });
 
-  it('populates ~40 realistic equipment assets across all types and locations', async () => {
+  it('populates ~41 realistic equipment assets across all types and locations', async () => {
     const equipCountRes = await pool.query(`SELECT count(*) FROM equipment`);
     const count = parseInt(equipCountRes.rows[0].count, 10);
     expect(count).toBeGreaterThanOrEqual(35);
@@ -44,20 +54,23 @@ describe('Idempotent Database Seed Suite', () => {
     }
 
     expect(statusMap.get('available')).toBeGreaterThan(20);
-    expect(statusMap.get('rented')).toBeGreaterThanOrEqual(5);
+    // 2 active rentals containing 5 and 2 items respectively (total 7 items currently rented)
+    expect(statusMap.get('rented')).toBe(7);
     expect(statusMap.get('under_repair')).toBeGreaterThanOrEqual(1);
   });
 
-  it('creates 3 suppliers and 3 customers with valid ZATCA VAT numbers', async () => {
+  it('creates 3 fictional suppliers and 3 fictional customers with mock VAT numbers', async () => {
     const suppRes = await pool.query(`SELECT * FROM parties WHERE is_supplier = true`);
     expect(suppRes.rows.length).toBe(3);
 
     const custRes = await pool.query(`SELECT * FROM parties WHERE is_customer = true`);
     expect(custRes.rows.length).toBe(3);
 
-    // All parties must have 15-digit Saudi VAT numbers starting with 3 and ending with 3
-    for (const party of [...suppRes.rows, ...custRes.rows]) {
-      expect(party.vat_no).toMatch(/^3\d{13}3$/);
+    const allParties = [...suppRes.rows, ...custRes.rows];
+    // Ensure no real company names are present
+    for (const party of allParties) {
+      expect(party.name).not.toMatch(/Aramco|SABIC|Nesma/i);
+      expect(party.vat_no).toMatch(/^[12]0{13}[1-9]$/);
     }
   });
 

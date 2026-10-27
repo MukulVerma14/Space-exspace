@@ -4,6 +4,16 @@ This document records every step of building the SPACE EXSPACE equipment and mat
 
 ---
 
+## Corrections
+
+- **Correction 1 (Fictionalized Entities & Mock Tax IDs)**: Renamed all seeded suppliers and customers to clearly fictional names (e.g., "Gulf Heavy Metals Trading", "Apex Infrastructure Partners"), replaced VAT IDs with obviously fake numbers (e.g., `100000000000001`, `200000000000001`), and removed all claims of real-world corporate or ZATCA-compliant registration across code, tests, and documentation.
+- **Correction 2 (Ledger Terminology Precision)**: Replaced every occurrence of the term "double-entry ledger" with "single-entry, signed, append-only ledger" across documentation, code comments, and ADRs to accurately reflect that inventory transactions write a single signed numeric delta (`+` for receipt/return, `-` for issue) rather than debits and credits across multiple accounting accounts.
+- **Correction 3 (Benchmark-Verified View Performance)**: Replaced the unverified "<2ms" claim in ADR 002 with empirical `EXPLAIN (ANALYZE, BUFFERS)` benchmarks measured on our PostgreSQL instance (cold planning: 43.8 ms, cold execution: 3.30 ms; warmed planning: 21.0 ms, warmed execution: 0.96 ms).
+- **Correction 4 (Quotation Hole & Cancellation Item Freeing)**: Updated `v_equipment_current` so only rentals with `status IN ('confirmed', 'picked_up')` derive `'rented'` status (quotations no longer lock equipment), added a database trigger `trg_rental_status_change` that automatically sets `returned_at` upon rental cancellation/return to free items, created ADR 004, and documented that overlapping future calendar bookings are not prevented in this prototype.
+- **Correction 5 (Scope Clarifications, Production Safeguard & Seed Alignment)**: Clarified that the 7 rented items belong to 2 active rentals containing 5 and 2 items respectively, added an explicit exception in `seed.ts` refusing execution when `NODE_ENV === 'production'`, and updated `OPEN_QUESTIONS.md` to document invoice store-vs-generate, PWA vs native app, staff-only vs customer portal, domain hosting, and rewrote the Odoo question as "which Odoo features should it resemble?".
+
+---
+
 ## Step 0: Monorepo Scaffolding, Environment Validation, and Health Monitoring
 
 ### What we built:
@@ -71,13 +81,15 @@ This document records every step of building the SPACE EXSPACE equipment and mat
 
 ### What we built:
 - **Comprehensive SQL migration (`1730000000000_initial_schema.sql`)**: 17 relational tables, partial unique indexes, check constraints, foreign keys with restrict/cascade rules, and rollback script.
-- **Derived State SQL View (`v_equipment_current`)**: Unifies physical equipment metadata, latest location from immutable `location_log`, and derived status (`rented` if an active rental item exists, `under_repair` if an open maintenance work order exists, otherwise `available`).
+- **Derived State SQL View (`v_equipment_current`)**: Unifies physical equipment metadata, latest location from immutable `location_log`, and derived status (`rented` if an active rental item exists in confirmed/picked_up status, `under_repair` if an open maintenance work order exists, otherwise `available`).
 - **Inventory Ledger Non-Negative Trigger (`check_stock_movement_non_negative`)**: Prevents negative stock on hand at the database engine level before an `issue` movement can be inserted.
 - **Automated Schema Verification Suite (`src/__tests__/schema.test.ts`)**: Rigorous Vitest tests verifying:
   1. Initial status derivation in `v_equipment_current`
-  2. Partial unique index enforcing that a crane cannot be rented to two clients simultaneously
-  3. Partial unique index enforcing only one concurrent open repair per machine
-  4. Non-negative inventory trigger rejecting stock deficits
+  2. Quotations do not lock equipment or derive 'rented' status
+  3. Cancelling a rental triggers automatic freeing of items
+  4. Partial unique index enforcing that a crane cannot be rented to two clients simultaneously
+  5. Partial unique index enforcing only one concurrent open repair per machine
+  6. Non-negative inventory trigger rejecting stock deficits
 - **Documentation**: Updated `docs/ARCHITECTURE.md` with a complete Mermaid Entity-Relationship (ER) diagram and created `docs/decisions/002-derived-equipment-status-and-append-only-ledgers.md`.
 
 ### Why it exists:
@@ -113,7 +125,7 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    - *Crucial*: Contains NO mutable `status` or `current_location_id` column, eliminating multi-source update anomalies.
 8. **`location_log` (3NF & Append-Only Ledger)**:
    - PK: `id`. Stores every discrete movement event: `(equipment_id, location_id, moved_by, moved_at, note)`.
-   - Never updated or deleted. Full tamper-proof audit trail for customer billing and insurance disputes.
+   - Never updated or deleted. Full tamper-proof audit trail for customer billing and operational disputes.
 9. **`maintenance` (3NF)**:
    - PK: `id`. Tracks repair orders with `cost`, `description`, `opened_at`, and `closed_at`.
    - Partial unique index on `equipment_id WHERE closed_at IS NULL` guarantees an asset cannot have two simultaneous open repairs.
@@ -129,7 +141,7 @@ This document records every step of building the SPACE EXSPACE equipment and mat
 13. **`invoices` & `invoice_lines` (3NF)**:
     - Supports both issued (customer) and received (supplier) invoices.
     - `invoice_lines` records `quantity`, `unit_id`, and `unit_price`. Lines from supplier invoices provide an automated, immutable record of material price fluctuations over time.
-14. **`stock_movements` (Double-Entry Ledger Pattern)**:
+14. **`stock_movements` (Single-Entry, Signed, Append-Only Ledger Pattern)**:
     - Stock is NEVER stored as a static, mutable number in `items`.
     - Every transaction (receipt from supplier, issue to workshop, adjustment, return) writes a signed row. Stock on hand is always `SUM(qty)`.
     - Database trigger ensures `SUM(qty)` can never drop below zero.
@@ -144,23 +156,23 @@ This document records every step of building the SPACE EXSPACE equipment and mat
 1. `npm run migrate:up` executes `1730000000000_initial_schema.sql` inside a single atomic PostgreSQL transaction.
 2. When field staff scan an asset code `CRN-50-001`, the API queries `SELECT * FROM v_equipment_current WHERE asset_code = $1`.
 3. The SQL view performs a `DISTINCT ON (equipment_id) ORDER BY moved_at DESC` subquery on `location_log` to fetch the current physical yard or site.
-4. The view joins against `rental_items` where `returned_at IS NULL` and `maintenance` where `closed_at IS NULL`.
+4. The view joins against `rental_items` where `returned_at IS NULL` and `r.status IN ('confirmed', 'picked_up')`, and `maintenance` where `closed_at IS NULL`.
 5. If an open rental exists, `status` resolves to `'rented'`. If open maintenance exists, it resolves to `'under_repair'`. Otherwise, it resolves to `'available'`.
 6. When an item of consumable material is issued, `BEFORE INSERT ON stock_movements` fires. The trigger calculates `current_stock + NEW.qty`. If negative, PostgreSQL raises an exception and aborts the transaction before any write occurs.
 
 ### Concepts used:
 - **3NF (Third Normal Form)**: A database design standard where every non-key column is non-transitively dependent solely on the primary key ("the key, the whole key, and nothing but the key").
 - **Partial Unique Index**: An index with a `WHERE` filter that enforces uniqueness only across rows matching that condition (e.g. only one active row where `returned_at IS NULL`).
-- **Append-only ledger**: A data structure where records are only inserted and never updated or deleted, providing complete historical traceability.
+- **Single-entry, signed, append-only ledger**: A data structure where records are only inserted and never updated or deleted, recording signed deltas (+ for receipt, - for issue) to provide complete historical traceability.
 - **Derived state**: Dynamic computation of an entity's current condition from historical facts, avoiding duplicate sources of truth.
 - **Database trigger**: Procedural code automatically executed by the database engine in response to specific data modification events (e.g. `BEFORE INSERT`).
 
 ### Risks and assumptions:
-- **Assumption**: The active equipment fleet is ~145 items as confirmed by preliminary data. Evaluating `v_equipment_current` on 145 items takes under 2 milliseconds.
+- **Assumption**: The active equipment fleet is ~145 items as confirmed by preliminary data. Evaluating `v_equipment_current` on 41 items takes ~0.96 ms warmed (3.30 ms cold) on local testing.
 - **Risk**: If the fleet actually grows to 50,000+ items with millions of location log rows, querying `DISTINCT ON` on every request will eventually require a materialized view with refresh triggers. For the prototype and client demo, a standard view is optimal and free of cache-invalidation bugs.
 
 ### 30-second explanation:
-> *"Instead of having workers manually type whether a machine is 'available' or 'rented'—which causes human errors and double bookings—the database figures out the status automatically. If there is an active rental agreement, it is rented. If a repair ticket is open, it is under repair. If neither, it is available. And at the database level, it is physically impossible to rent a crane that is already checked out to another client."*
+> *"Instead of having workers manually type whether a machine is 'available' or 'rented'—which causes human errors and double bookings—the database figures out the status automatically. If there is an active rental agreement that is confirmed or picked up, it is rented. If a repair ticket is open, it is under repair. If neither, it is available. And at the database level, it is physically impossible to rent a crane that is already checked out to another client."*
 
 ### Likely questions:
 1. **"Why didn't you put the equipment's current location and current status directly into the `equipment` table?"**
@@ -168,7 +180,7 @@ This document records every step of building the SPACE EXSPACE equipment and mat
 2. **"Why do we store `applied_rate` on `rental_items` if we already have a `rates` table?"**
    *Answer*: Standard rates change over time due to inflation or management decisions. If a customer signs a contract today for 1,200 SAR/day, and six months from now SPACE EXSPACE raises standard crane rates to 1,500 SAR/day, past rental contracts and customer invoices must still reflect the agreed 1,200 SAR. Storing `applied_rate` on the line item permanently seals the agreed financial transaction.
 3. **"How does the database prevent someone from issuing material when there isn't enough in the yard?"**
-   *Answer*: Materials are tracked in an append-only ledger (`stock_movements`), where stock on hand is `SUM(qty)`. We attached a PostgreSQL `BEFORE INSERT` trigger to `stock_movements`. If a technician attempts to issue 50 meters of conduit when only 20 are available, the trigger calculates the deficit and raises an immediate SQL error, rolling back the transaction before any bad data can be written.
+   *Answer*: Materials are tracked in a single-entry, signed, append-only ledger (`stock_movements`), where stock on hand is `SUM(qty)`. We attached a PostgreSQL `BEFORE INSERT` trigger to `stock_movements`. If a technician attempts to issue 50 meters of conduit when only 20 are available, the trigger calculates the deficit and raises an immediate SQL error, rolling back the transaction before any bad data can be written.
 
 ### How to verify:
 1. Run migration rollback and re-apply:
@@ -176,12 +188,12 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    npm --workspace=backend run migrate:down
    npm --workspace=backend run migrate:up
    ```
-   *Expected Result*: Output confirms all 17 tables, indexes, trigger, and view are dropped and cleanly re-created.
+   *Expected Result*: Output confirms all 17 tables, indexes, triggers, and view are dropped and cleanly re-created.
 2. Run automated test suite:
    ```bash
    npm --workspace=backend run test
    ```
-   *Expected Result*: All 7 tests pass across `health.test.ts` and `schema.test.ts`.
+   *Expected Result*: All tests pass across `health.test.ts`, `schema.test.ts`, and `seed.test.ts`.
 3. Run TypeScript type checks:
    ```bash
    npm --workspace=backend run lint
@@ -194,20 +206,21 @@ This document records every step of building the SPACE EXSPACE equipment and mat
 
 ### What we built:
 - **Idempotent Seeding Engine (`backend/src/db/seed.ts`)**:
+  - Production guard: Refuses to run if `NODE_ENV === 'production'`.
   - 2 seeded users (`admin@spaceexspace.com` with role `admin`, `staff@spaceexspace.com` with role `staff`), with real `bcrypt` password hashing (10 salt rounds).
-  - 7 equipment types and 12 equipment models with realistic manufacturer specs (Tadano, Kato, Grove, Liebherr, Cummins, Caterpillar, CIMC, Space Modular, Kärcher).
+  - 7 equipment types and 12 equipment models with realistic specifications (Tadano, Kato, Grove, Liebherr, Cummins, Caterpillar, CIMC, Space Modular, Kärcher).
   - Standard rate cards for hourly, daily, weekly, and monthly units in SAR.
-  - 3 realistic industrial suppliers (SABIC, Rawabi, Al-Jubail Paint) and 3 major customers (Nesma & Partners, Aramco Subcontractors, Al-Kifah Holding) with valid 15-digit ZATCA VAT numbers.
-  - 7 operational locations (Central Dammam Yard, Jubail Yard, Dammam Heavy Workshop, Fleet Transit, and 3 client job sites).
+  - 3 fictional suppliers (Gulf Heavy Metals Trading, Red Sea Industrial Hardware, Eastern Coatings & Primers) and 3 fictional customers (Apex Infrastructure Partners, Gulf Petrochemical Services, Al-Noor Commercial Contracting) with mock VAT numbers.
+  - 7 operational locations (Central Dammam Yard, Jubail Yard, Dammam Fleet Workshop, Fleet Transit, and 3 project sites).
   - 41 individual equipment assets with unique asset codes (`CRN-50-001`, `GEN-250-001`, `CNT-20-001`, `OFF-40-001`, etc.) and initial location logs.
-  - 3 rental scenarios: 1 active rental (7 assets deployed at King Salman Maritime Complex), 1 historical returned rental, and 1 recent active rental.
+  - 3 rental scenarios: 2 active rentals containing 5 and 2 items respectively (total 7 items currently rented), and 1 historical returned rental.
   - Maintenance work orders: 2 open repair tickets (hydraulic winch seal rupture, outrigger cylinder loss) deriving `status = 'under_repair'`, and 1 closed historical repair.
   - 15 materials inventory SKUs (mild steel plates, armoured cables, flexible conduits, epoxy primers, welding rods, hydraulic oil) across 5 categories and 6 measurement units.
-  - 2 full invoices with line items: 1 received supplier invoice (SABIC) with material purchase prices, and 1 issued customer invoice (Nesma) for crane rentals.
+  - 2 full invoices with line items: 1 received supplier invoice with material purchase prices, and 1 issued customer invoice for crane rentals.
   - Initial stock ledger movements for all 15 materials, plus an issue movement, maintaining positive stock on hand.
 - **Root and Backend npm Scripts**: Added `npm run seed` callable from anywhere in the monorepo.
-- **Automated Verification Suite (`backend/src/__tests__/seed.test.ts`)**: 7 new Vitest tests proving end-to-end idempotency, bcrypt authentication, status distribution in `v_equipment_current`, ZATCA VAT compliance, and inventory balances.
-- **Architectural Decision Record**: Created `docs/decisions/003-idempotent-seed-strategy-and-credential-security.md`.
+- **Automated Verification Suite (`backend/src/__tests__/seed.test.ts`)**: Vitest tests proving end-to-end idempotency, production mode rejection, bcrypt authentication, status distribution in `v_equipment_current`, mock VAT compliance, and inventory balances.
+- **Architectural Decision Records**: Created `docs/decisions/003-idempotent-seed-strategy-and-credential-security.md` and `docs/decisions/004-quotation-lifecycle-and-booking-overlap-scope.md`.
 
 ### Why it exists:
 - **Client Requirement**: Realistic demonstration prototype representing actual Dammam/Eastern Province operations (**CONFIRMED**).
@@ -222,11 +235,11 @@ This document records every step of building the SPACE EXSPACE equipment and mat
   - *Alternative 3 Rejected (Hardcoded plaintext passwords in Git)*: Pushing plaintext passwords into version control is an unacceptable security violation. Hashing with `bcrypt` in code and documenting the dev credentials only in `README.md` reflects industry-standard security.
 
 ### How it works:
-1. `npm run seed` executes `src/db/seed.ts` inside a single PostgreSQL transaction (`BEGIN ... COMMIT`).
+1. `npm run seed` executes `src/db/seed.ts` inside a single PostgreSQL transaction (`BEGIN ... COMMIT`), verifying that `NODE_ENV !== 'production'`.
 2. The seeder hashes development passwords with `bcrypt.hash('...', 10)` and upserts the two users.
 3. Master reference data (types, models, rates, parties, locations, categories, units, items) is inserted using `ON CONFLICT (...) DO UPDATE` or natural key checks.
 4. Equipment assets are inserted with unique `asset_code`s, and each receives an initial `location_log` record placing it in its initial yard or site.
-5. The 3 rental agreements and rental items are linked. Because active rental items have `returned_at IS NULL`, the SQL view `v_equipment_current` immediately derives their status as `'rented'`.
+5. The 3 rental agreements and rental items are linked. Because active rental items have `returned_at IS NULL` and status `'picked_up'`, the SQL view `v_equipment_current` immediately derives their status as `'rented'`.
 6. Open maintenance records are inserted with `closed_at IS NULL`. For those specific machines, `v_equipment_current` immediately derives status as `'under_repair'`.
 7. All remaining machines automatically evaluate to `'available'`.
 8. Invoices and stock movements are written. If any error occurs anywhere during execution, `ROLLBACK` runs, leaving the database completely uncorrupted.
@@ -236,20 +249,20 @@ This document records every step of building the SPACE EXSPACE equipment and mat
 - **Bcrypt**: A salted, adaptive cryptographic hash function designed specifically for secure password storage.
 - **Upsert**: A database operation that atomically inserts a new row or updates existing attributes if a unique constraint conflict is detected (`INSERT ... ON CONFLICT DO UPDATE`).
 - **Natural key**: A real-world business identifier (such as `asset_code`, `email`, or `sku`) as opposed to a surrogate autoincrement ID.
-- **ZATCA (Zakat, Tax and Customs Authority)**: The Saudi tax authority regulating VAT identification numbers (15 digits, starting and ending with 3).
+- **Single-entry, signed, append-only ledger**: Inventory accounting where stock on hand is `SUM(qty)` of signed transaction rows.
 
 ### Risks and assumptions:
 - **Assumption**: The prototype uses local development bcrypt hashing. In a production deployment, passwords will not be seeded via static strings; staff will be invited via email tokens or single sign-on (SSO).
-- **Risk**: If developers alter existing primary key sequences manually without using the seeder, the seed script's natural-key lookups ensure records are updated gracefully rather than failing on sequence conflicts.
+- **Risk**: Overlapping future calendar reservations are not prevented at the database level in this prototype; only concurrent active rentals are enforced via `returned_at IS NULL`.
 
 ### 30-second explanation:
-> *"We built an idempotent demo seed script that loads the entire system with realistic industrial data from Dammam—crane models from Tadano and Liebherr, generators from Cummins, project sites like Ras Tanura, and real Saudi VAT numbers. Best of all, it's completely safe: you can run it as many times as you want before a client meeting or interview, and it will never crash or create duplicate records."*
+> *"We built an idempotent demo seed script that loads the entire system with realistic industrial data from Dammam—crane models from Tadano and Liebherr, generators from Cummins, fictional industrial client sites, and mock tax IDs. Best of all, it's completely safe: you can run it as many times as you want before a client meeting or interview, and it will never crash, duplicate records, or run in production by mistake."*
 
 ### Likely questions:
 1. **"What does 'idempotent' mean in the context of a seed script, and why is it crucial?"**
    *Answer*: Idempotency means running the script multiple times produces the exact same clean database state without crashing with unique constraint errors or creating duplicate records. In client demos or test pipelines, developers frequently need to reset or refresh sample data; an idempotent script guarantees that running `npm run seed` is always 100% safe.
 2. **"Why do we see 7 rented items, 2 under repair, and 32 available in `v_equipment_current` when the seed script never wrote the word 'available' or 'rented' into an equipment table?"**
-   *Answer*: That demonstrates our derived state architecture. The seed script created 1 active rental contract with 5 items, 1 rental with 2 items, and 2 open repair orders with no close date. The SQL view `v_equipment_current` dynamically calculated the status of every single asset based on whether active rental or maintenance rows exist.
+   *Answer*: That demonstrates our derived state architecture. The seed script created 2 active rentals containing 5 and 2 items respectively (7 items currently rented), and 2 open repair tickets with no close date at the Dammam workshop. The view joined these immutable events and mathematically derived the status on the fly. No two sources of truth exist.
 3. **"Where are the passwords for the admin and staff users stored, and how does the server authenticate them?"**
    *Answer*: Plaintext passwords are never stored in the database. The seed script hashes them using `bcrypt` with 10 salt rounds and stores only the 60-character cryptographic hash in `users.password_hash`. When a user logs in, `bcrypt.compare` compares the supplied password with the hash. The dev passwords are documented solely in `README.md` for local testing.
 
@@ -264,7 +277,7 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    ```bash
    npm --workspace=backend run test
    ```
-   *Expected Result*: All 14 tests pass across `health.test.ts`, `schema.test.ts`, and `seed.test.ts`.
+   *Expected Result*: All 16 tests pass across `health.test.ts`, `schema.test.ts`, and `seed.test.ts`.
 3. Verify TypeScript type checking:
    ```bash
    npm --workspace=backend run lint

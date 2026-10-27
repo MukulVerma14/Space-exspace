@@ -254,7 +254,7 @@ erDiagram
 │   │   ├── utils/           # Structured logging (Pino) & helpers
 │   │   ├── app.ts           # Express application & middleware chain
 │   │   ├── server.ts        # Server entrypoint with graceful shutdown
-│   │   └── __tests__/       # Vitest test suites (health, schema, business rules)
+│   │   └── __tests__/       # Vitest test suites (health, schema, seed)
 │   ├── migrations/          # Plain SQL migrations (node-pg-migrate)
 │   ├── .env.example
 │   ├── package.json
@@ -272,9 +272,9 @@ erDiagram
 ```
 
 ## 4. Core Architectural Principles
-1. **Derived State Over Stored State**: Physical equipment status (`available`, `rented`, `under_repair`) is derived dynamically in a SQL View (`v_equipment_current`) from immutable action records rather than mutable status columns.
+1. **Derived State Over Stored State**: Physical equipment status (`available`, `rented`, `under_repair`) is derived dynamically in a SQL View (`v_equipment_current`) from immutable action records rather than mutable status columns. Quotations and cancelled rentals do not lock assets.
 2. **Append-Only Ledgers**:
    - Location tracking is stored as an immutable audit trail in `location_log`.
-   - Materials inventory is stored as an immutable double-entry ledger in `stock_movements`.
+   - Materials inventory is stored as a single-entry, signed, append-only ledger in `stock_movements`.
 3. **No ORM (Raw Parameterised SQL)**: Direct SQL allows explicit control over partial indexes, CHECK constraints, multi-table transactions, and database views without leaky abstraction layers.
 4. **Defense in Depth**: Role boundaries (Admin vs Staff) are enforced server-side via data serialization guards, ensuring sensitive financial rates are never sent over the wire to unauthorized staff.

@@ -13,7 +13,7 @@ Industrial equipment and materials tracking prototype for **SPACE EXSPACE Compan
   - `/backend`: Node.js 20+, TypeScript, Express, native `pg` driver, plain SQL migrations (`node-pg-migrate`), Zod validation, Vitest.
   - `/frontend`: Vite + React + TypeScript, mobile-first PWA with camera QR scanning.
   - `/docs`: Architecture specs, open client questions, learning logs, and architectural decision records (ADRs).
-- **Database**: PostgreSQL 16 with partial unique indexes, append-only ledger tables, and derived-state SQL views (`v_equipment_current`).
+- **Database**: PostgreSQL 16 with partial unique indexes, single-entry signed append-only ledger tables, and derived-state SQL views (`v_equipment_current`).
 
 ---
 
@@ -49,7 +49,7 @@ npm run migrate:backend
 ```
 
 ### 4. Seed Idempotent Demo Data
-Populate realistic equipment (~41 assets), standard rate cards, 3 customers, 3 suppliers, rentals, repairs, materials, and invoices:
+Populate realistic equipment (~41 assets), standard rate cards, fictional customers, fictional suppliers, rentals, repairs, materials, and invoices:
 ```bash
 npm run seed
 ```
@@ -86,6 +86,7 @@ npm --workspace=backend run lint
 - [ADR 001: Plain SQL Migrations and No ORM](docs/decisions/001-no-orm-and-sql-migrations.md)
 - [ADR 002: Derived Equipment Status and Append-Only Ledgers](docs/decisions/002-derived-equipment-status-and-append-only-ledgers.md)
 - [ADR 003: Idempotent Seed Strategy and Credential Security](docs/decisions/003-idempotent-seed-strategy-and-credential-security.md)
+- [ADR 004: Quotation Lifecycle, Cancellation Item Freeing, and Future Booking Overlap Scope](docs/decisions/004-quotation-lifecycle-and-booking-overlap-scope.md)
 
 ## Pedagogical Documentation
 - [Architecture & Data Model](docs/ARCHITECTURE.md)

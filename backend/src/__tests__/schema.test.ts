@@ -14,6 +14,7 @@ describe('Database Schema, Constraints, and Derived View', () => {
   const testEmail = 'tester_schema@spaceexspace.com';
   const testAssetCode = 'TEST-CRN-001';
   const testSku = 'TEST-CONDUIT-001';
+  const testCustomerName = 'Fictional Industrial Contractor Ltd';
 
   async function cleanupTestData() {
     await pool.query(`DELETE FROM rental_items WHERE equipment_id IN (SELECT id FROM equipment WHERE asset_code = $1)`, [testAssetCode]);
@@ -24,9 +25,9 @@ describe('Database Schema, Constraints, and Derived View', () => {
     await pool.query(`DELETE FROM stock_movements WHERE item_id IN (SELECT id FROM items WHERE sku = $1)`, [testSku]);
     await pool.query(`DELETE FROM equipment WHERE asset_code = $1`, [testAssetCode]);
     await pool.query(`DELETE FROM items WHERE sku = $1`, [testSku]);
-    await pool.query(`DELETE FROM rentals WHERE customer_id IN (SELECT id FROM parties WHERE name = 'Test Aramco Contractor')`);
-    await pool.query(`DELETE FROM locations WHERE name IN ('Test Main Dammam Yard', 'Test Ras Tanura Site')`);
-    await pool.query(`DELETE FROM parties WHERE name = 'Test Aramco Contractor'`);
+    await pool.query(`DELETE FROM rentals WHERE customer_id IN (SELECT id FROM parties WHERE name = $1)`, [testCustomerName]);
+    await pool.query(`DELETE FROM locations WHERE name IN ('Fictional Yard Alpha', 'Fictional Site Beta')`);
+    await pool.query(`DELETE FROM parties WHERE name = $1`, [testCustomerName]);
     await pool.query(`DELETE FROM users WHERE email = $1`, [testEmail]);
   }
 
@@ -61,18 +62,19 @@ describe('Database Schema, Constraints, and Derived View', () => {
     );
     testModelId = modelRes.rows[0].id;
 
-    // Create test customer party
+    // Create test customer party with fictional name and mock VAT
     const partyRes = await pool.query(
       `INSERT INTO parties (name, vat_no, is_customer)
-       VALUES ('Test Aramco Contractor', '310123456700003', true)
-       RETURNING id`
+       VALUES ($1, '900000000000001', true)
+       RETURNING id`,
+      [testCustomerName]
     );
     testCustomerId = partyRes.rows[0].id;
 
     // Create locations
     const yardRes = await pool.query(
       `INSERT INTO locations (name, kind)
-       VALUES ('Test Main Dammam Yard', 'yard')
+       VALUES ('Fictional Yard Alpha', 'yard')
        ON CONFLICT (name) DO UPDATE SET kind = EXCLUDED.kind
        RETURNING id`
     );
@@ -80,7 +82,7 @@ describe('Database Schema, Constraints, and Derived View', () => {
 
     const siteRes = await pool.query(
       `INSERT INTO locations (name, kind, party_id)
-       VALUES ('Test Ras Tanura Site', 'client_site', $1)
+       VALUES ('Fictional Site Beta', 'client_site', $1)
        ON CONFLICT (name) DO UPDATE SET party_id = EXCLUDED.party_id
        RETURNING id`,
       [testCustomerId]
@@ -140,22 +142,50 @@ describe('Database Schema, Constraints, and Derived View', () => {
     const item = res.rows[0];
     expect(item.asset_code).toBe(testAssetCode);
     expect(item.status).toBe('available');
-    expect(item.current_location_name).toBe('Test Main Dammam Yard');
+    expect(item.current_location_name).toBe('Fictional Yard Alpha');
     expect(item.capacity_value).toBe('50.00');
     expect(item.capacity_unit).toBe('ton');
   });
 
-  it('enforces partial unique index: cannot rent the same equipment twice while active', async () => {
-    // Create first rental
+  it('quotation status does NOT mark equipment as rented', async () => {
+    // Create rental in 'quotation' status
+    const quoteRes = await pool.query(
+      `INSERT INTO rentals (customer_id, site_id, status, start_date, expected_end)
+       VALUES ($1, $2, 'quotation', '2026-11-01', '2026-11-15')
+       RETURNING id`,
+      [testCustomerId, testLocationSiteId]
+    );
+    const quoteRentalId = quoteRes.rows[0].id;
+
+    await pool.query(
+      `INSERT INTO rental_items (rental_id, equipment_id, applied_rate, rate_unit)
+       VALUES ($1, $2, 1200.00, 'daily')`,
+      [quoteRentalId, testEquipmentId]
+    );
+
+    // v_equipment_current must still derive 'available' because quotation is not confirmed or picked_up
+    const viewRes = await pool.query(
+      `SELECT status FROM v_equipment_current WHERE id = $1`,
+      [testEquipmentId]
+    );
+    expect(viewRes.rows[0].status).toBe('available');
+
+    // Clean up quotation
+    await pool.query(`DELETE FROM rental_items WHERE rental_id = $1`, [quoteRentalId]);
+    await pool.query(`DELETE FROM rentals WHERE id = $1`, [quoteRentalId]);
+  });
+
+  it('enforces partial unique index and derives status as rented when confirmed, and cancelling frees items', async () => {
+    // 1. Create first confirmed rental
     const rental1Res = await pool.query(
       `INSERT INTO rentals (customer_id, site_id, status, start_date, expected_end)
-       VALUES ($1, $2, 'picked_up', '2026-11-01', '2026-11-15')
+       VALUES ($1, $2, 'confirmed', '2026-11-01', '2026-11-15')
        RETURNING id`,
       [testCustomerId, testLocationSiteId]
     );
     const rental1Id = rental1Res.rows[0].id;
 
-    // Attach equipment to rental 1
+    // Attach equipment to confirmed rental
     await pool.query(
       `INSERT INTO rental_items (rental_id, equipment_id, applied_rate, rate_unit)
        VALUES ($1, $2, 1200.00, 'daily')`,
@@ -168,9 +198,9 @@ describe('Database Schema, Constraints, and Derived View', () => {
       [testEquipmentId]
     );
     expect(currentViewRes.rows[0].status).toBe('rented');
-    expect(currentViewRes.rows[0].current_customer_name).toBe('Test Aramco Contractor');
+    expect(currentViewRes.rows[0].current_customer_name).toBe(testCustomerName);
 
-    // Create second rental
+    // 2. Create second confirmed rental - attempting to attach same equipment while active must FAIL
     const rental2Res = await pool.query(
       `INSERT INTO rentals (customer_id, site_id, status, start_date, expected_end)
        VALUES ($1, $2, 'confirmed', '2026-11-05', '2026-11-20')
@@ -179,7 +209,6 @@ describe('Database Schema, Constraints, and Derived View', () => {
     );
     const rental2Id = rental2Res.rows[0].id;
 
-    // Attempting to attach the same equipment to rental 2 while returned_at IS NULL must FAIL
     await expect(
       pool.query(
         `INSERT INTO rental_items (rental_id, equipment_id, applied_rate, rate_unit)
@@ -188,13 +217,24 @@ describe('Database Schema, Constraints, and Derived View', () => {
       )
     ).rejects.toThrow(/uq_active_rental_item/);
 
-    // Now return equipment from rental 1
-    await pool.query(
-      `UPDATE rental_items SET returned_at = NOW() WHERE rental_id = $1 AND equipment_id = $2`,
+    // 3. Cancelling rental 1 automatically triggers freeing items (sets returned_at)
+    await pool.query(`UPDATE rentals SET status = 'cancelled' WHERE id = $1`, [rental1Id]);
+
+    // Check that returned_at was set on rental_items by the trigger
+    const itemCheckRes = await pool.query(
+      `SELECT returned_at FROM rental_items WHERE rental_id = $1 AND equipment_id = $2`,
       [rental1Id, testEquipmentId]
     );
+    expect(itemCheckRes.rows[0].returned_at).not.toBeNull();
 
-    // Now the equipment can be assigned to rental 2 without conflict
+    // Verify view now derives status as 'available'
+    const cancelledViewRes = await pool.query(
+      `SELECT status FROM v_equipment_current WHERE id = $1`,
+      [testEquipmentId]
+    );
+    expect(cancelledViewRes.rows[0].status).toBe('available');
+
+    // 4. Now rental 2 can successfully attach the equipment
     const assignRes = await pool.query(
       `INSERT INTO rental_items (rental_id, equipment_id, applied_rate, rate_unit)
        VALUES ($1, $2, 1100.00, 'daily')
@@ -203,11 +243,8 @@ describe('Database Schema, Constraints, and Derived View', () => {
     );
     expect(assignRes.rows.length).toBe(1);
 
-    // Return from rental 2 to leave it clean for next tests
-    await pool.query(
-      `UPDATE rental_items SET returned_at = NOW() WHERE rental_id = $1 AND equipment_id = $2`,
-      [rental2Id, testEquipmentId]
-    );
+    // Clean up rental 2
+    await pool.query(`UPDATE rentals SET status = 'cancelled' WHERE id = $1`, [rental2Id]);
   });
 
   it('enforces partial unique index on maintenance: only one active maintenance at a time', async () => {
