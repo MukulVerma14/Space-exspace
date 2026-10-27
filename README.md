@@ -17,10 +17,14 @@ Industrial equipment and materials tracking prototype for **SPACE EXSPACE Compan
 
 ---
 
-## Prerequisites
-- **Node.js**: v20.0.0 or higher
-- **npm**: v10.0.0 or higher
-- **Docker & Docker Compose** (or a local PostgreSQL 16 instance running on port 5432)
+## Development Accounts (Demo / Prototype)
+> [!IMPORTANT]
+> These credentials are for local development and client demo environments only. They are seeded automatically via `npm run seed`.
+
+| Role | Name | Email | Password | Access Scope |
+|---|---|---|---|---|
+| **Admin** | Abdullah Al-Dosari | `admin@spaceexspace.com` | `Admin#2026!Dev` | Full fleet, rate cards, rental contracts, invoice tracking, stock ledgers |
+| **Staff** | Tariq Mansour | `staff@spaceexspace.com` | `Staff#2026!Dev` | QR scan, location moves, repair tickets (no access to pricing/rates) |
 
 ---
 
@@ -39,36 +43,27 @@ cp backend/.env.example backend/.env
 ```
 Ensure your database credentials match your PostgreSQL instance.
 
-### 3. Start PostgreSQL
-Using Docker Compose:
+### 3. Run Database Migrations
 ```bash
-docker compose up -d
+npm run migrate:backend
 ```
-*(If running a local PostgreSQL service, create the database `space_exspace` on port 5432).*
 
-### 4. Run the Backend API
+### 4. Seed Idempotent Demo Data
+Populate realistic equipment (~41 assets), standard rate cards, 3 customers, 3 suppliers, rentals, repairs, materials, and invoices:
+```bash
+npm run seed
+```
+
+### 5. Run the Backend API
 ```bash
 npm run dev:backend
 ```
 The server will start on `http://localhost:3000`.
 
-### 5. Verify API Health
+### 6. Verify API Health
 Open a browser or run:
 ```bash
 curl http://localhost:3000/health
-```
-Expected response:
-```json
-{
-  "status": "ok",
-  "uptimeSeconds": 12,
-  "timestamp": "2026-10-27T08:50:00.000Z",
-  "environment": "development",
-  "database": {
-    "status": "connected",
-    "latencyMs": 4
-  }
-}
 ```
 
 ---
@@ -89,6 +84,8 @@ npm --workspace=backend run lint
 
 ## Architectural Decision Records (ADRs)
 - [ADR 001: Plain SQL Migrations and No ORM](docs/decisions/001-no-orm-and-sql-migrations.md)
+- [ADR 002: Derived Equipment Status and Append-Only Ledgers](docs/decisions/002-derived-equipment-status-and-append-only-ledgers.md)
+- [ADR 003: Idempotent Seed Strategy and Credential Security](docs/decisions/003-idempotent-seed-strategy-and-credential-security.md)
 
 ## Pedagogical Documentation
 - [Architecture & Data Model](docs/ARCHITECTURE.md)

@@ -10,7 +10,9 @@
   "scripts": {
     "dev:backend": "npm --workspace=backend run dev",
     "test:backend": "npm --workspace=backend run test",
-    "build:backend": "npm --workspace=backend run build"
+    "build:backend": "npm --workspace=backend run build",
+    "migrate:backend": "npm --workspace=backend run migrate:up",
+    "seed": "npm --workspace=backend run seed"
   },
   "engines": {
     "node": ">=20.0.0"

@@ -12,7 +12,8 @@
     "lint": "tsc --noEmit",
     "migrate:up": "node-pg-migrate -m migrations up",
     "migrate:down": "node-pg-migrate -m migrations down",
-    "migrate:redo": "node-pg-migrate -m migrations redo"
+    "migrate:redo": "node-pg-migrate -m migrations redo",
+    "seed": "tsx src/db/seed.ts"
   },
   "dependencies": {
     "bcrypt": "^5.1.1",

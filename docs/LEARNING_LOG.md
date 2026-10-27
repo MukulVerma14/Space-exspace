@@ -187,3 +187,86 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    npm --workspace=backend run lint
    ```
    *Expected Result*: `tsc --noEmit` exits with 0 errors.
+
+---
+
+## Step 2: Idempotent Realistic Database Seeding
+
+### What we built:
+- **Idempotent Seeding Engine (`backend/src/db/seed.ts`)**:
+  - 2 seeded users (`admin@spaceexspace.com` with role `admin`, `staff@spaceexspace.com` with role `staff`), with real `bcrypt` password hashing (10 salt rounds).
+  - 7 equipment types and 12 equipment models with realistic manufacturer specs (Tadano, Kato, Grove, Liebherr, Cummins, Caterpillar, CIMC, Space Modular, Kärcher).
+  - Standard rate cards for hourly, daily, weekly, and monthly units in SAR.
+  - 3 realistic industrial suppliers (SABIC, Rawabi, Al-Jubail Paint) and 3 major customers (Nesma & Partners, Aramco Subcontractors, Al-Kifah Holding) with valid 15-digit ZATCA VAT numbers.
+  - 7 operational locations (Central Dammam Yard, Jubail Yard, Dammam Heavy Workshop, Fleet Transit, and 3 client job sites).
+  - 41 individual equipment assets with unique asset codes (`CRN-50-001`, `GEN-250-001`, `CNT-20-001`, `OFF-40-001`, etc.) and initial location logs.
+  - 3 rental scenarios: 1 active rental (7 assets deployed at King Salman Maritime Complex), 1 historical returned rental, and 1 recent active rental.
+  - Maintenance work orders: 2 open repair tickets (hydraulic winch seal rupture, outrigger cylinder loss) deriving `status = 'under_repair'`, and 1 closed historical repair.
+  - 15 materials inventory SKUs (mild steel plates, armoured cables, flexible conduits, epoxy primers, welding rods, hydraulic oil) across 5 categories and 6 measurement units.
+  - 2 full invoices with line items: 1 received supplier invoice (SABIC) with material purchase prices, and 1 issued customer invoice (Nesma) for crane rentals.
+  - Initial stock ledger movements for all 15 materials, plus an issue movement, maintaining positive stock on hand.
+- **Root and Backend npm Scripts**: Added `npm run seed` callable from anywhere in the monorepo.
+- **Automated Verification Suite (`backend/src/__tests__/seed.test.ts`)**: 7 new Vitest tests proving end-to-end idempotency, bcrypt authentication, status distribution in `v_equipment_current`, ZATCA VAT compliance, and inventory balances.
+- **Architectural Decision Record**: Created `docs/decisions/003-idempotent-seed-strategy-and-credential-security.md`.
+
+### Why it exists:
+- **Client Requirement**: Realistic demonstration prototype representing actual Dammam/Eastern Province operations (**CONFIRMED**).
+- **Two Roles**: Admin and staff users with segregated privileges (**CONFIRMED**).
+- **Rate Cards & Frozen Applied Rates**: Standard rates with contract-specific applied rates (**CONFIRMED**).
+- **Materials Inventory & Invoices**: Consumables ledger with supplier invoice line price tracking (**CONFIRMED**).
+
+### Why this way:
+- **Upsert / Natural Key Seeding instead of `TRUNCATE CASCADE`**:
+  - *Alternative 1 Rejected (`TRUNCATE CASCADE` before insert)*: Wipes the entire database on every run. If an API server or developer has open database connections or is testing an in-progress flow, truncation destroys foreign keys and causes abrupt crashes. Upsert-based idempotency tests production-style write and update paths.
+  - *Alternative 2 Rejected (Raw SQL dump / `.sql` file)*: Does not test runtime bcrypt hashing, Zod schemas, or dynamic foreign key resolution across dependent tables.
+  - *Alternative 3 Rejected (Hardcoded plaintext passwords in Git)*: Pushing plaintext passwords into version control is an unacceptable security violation. Hashing with `bcrypt` in code and documenting the dev credentials only in `README.md` reflects industry-standard security.
+
+### How it works:
+1. `npm run seed` executes `src/db/seed.ts` inside a single PostgreSQL transaction (`BEGIN ... COMMIT`).
+2. The seeder hashes development passwords with `bcrypt.hash('...', 10)` and upserts the two users.
+3. Master reference data (types, models, rates, parties, locations, categories, units, items) is inserted using `ON CONFLICT (...) DO UPDATE` or natural key checks.
+4. Equipment assets are inserted with unique `asset_code`s, and each receives an initial `location_log` record placing it in its initial yard or site.
+5. The 3 rental agreements and rental items are linked. Because active rental items have `returned_at IS NULL`, the SQL view `v_equipment_current` immediately derives their status as `'rented'`.
+6. Open maintenance records are inserted with `closed_at IS NULL`. For those specific machines, `v_equipment_current` immediately derives status as `'under_repair'`.
+7. All remaining machines automatically evaluate to `'available'`.
+8. Invoices and stock movements are written. If any error occurs anywhere during execution, `ROLLBACK` runs, leaving the database completely uncorrupted.
+
+### Concepts used:
+- **Idempotency**: An operation that produces the exact same outcome whether executed once or a hundred times consecutively, without error or side effects.
+- **Bcrypt**: A salted, adaptive cryptographic hash function designed specifically for secure password storage.
+- **Upsert**: A database operation that atomically inserts a new row or updates existing attributes if a unique constraint conflict is detected (`INSERT ... ON CONFLICT DO UPDATE`).
+- **Natural key**: A real-world business identifier (such as `asset_code`, `email`, or `sku`) as opposed to a surrogate autoincrement ID.
+- **ZATCA (Zakat, Tax and Customs Authority)**: The Saudi tax authority regulating VAT identification numbers (15 digits, starting and ending with 3).
+
+### Risks and assumptions:
+- **Assumption**: The prototype uses local development bcrypt hashing. In a production deployment, passwords will not be seeded via static strings; staff will be invited via email tokens or single sign-on (SSO).
+- **Risk**: If developers alter existing primary key sequences manually without using the seeder, the seed script's natural-key lookups ensure records are updated gracefully rather than failing on sequence conflicts.
+
+### 30-second explanation:
+> *"We built an idempotent demo seed script that loads the entire system with realistic industrial data from Dammam—crane models from Tadano and Liebherr, generators from Cummins, project sites like Ras Tanura, and real Saudi VAT numbers. Best of all, it's completely safe: you can run it as many times as you want before a client meeting or interview, and it will never crash or create duplicate records."*
+
+### Likely questions:
+1. **"What does 'idempotent' mean in the context of a seed script, and why is it crucial?"**
+   *Answer*: Idempotency means running the script multiple times produces the exact same clean database state without crashing with unique constraint errors or creating duplicate records. In client demos or test pipelines, developers frequently need to reset or refresh sample data; an idempotent script guarantees that running `npm run seed` is always 100% safe.
+2. **"Why do we see 7 rented items, 2 under repair, and 32 available in `v_equipment_current` when the seed script never wrote the word 'available' or 'rented' into an equipment table?"**
+   *Answer*: That demonstrates our derived state architecture. The seed script created 1 active rental contract with 5 items, 1 rental with 2 items, and 2 open repair orders with no close date. The SQL view `v_equipment_current` dynamically calculated the status of every single asset based on whether active rental or maintenance rows exist.
+3. **"Where are the passwords for the admin and staff users stored, and how does the server authenticate them?"**
+   *Answer*: Plaintext passwords are never stored in the database. The seed script hashes them using `bcrypt` with 10 salt rounds and stores only the 60-character cryptographic hash in `users.password_hash`. When a user logs in, `bcrypt.compare` compares the supplied password with the hash. The dev passwords are documented solely in `README.md` for local testing.
+
+### How to verify:
+1. Run the seed script twice consecutively:
+   ```bash
+   npm run seed
+   npm run seed
+   ```
+   *Expected Result*: Both runs log `✅ Database seeded successfully with realistic idempotent demo data!` with 0 errors.
+2. Verify fleet status distribution:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 14 tests pass across `health.test.ts`, `schema.test.ts`, and `seed.test.ts`.
+3. Verify TypeScript type checking:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: `tsc --noEmit` exits with code 0.
