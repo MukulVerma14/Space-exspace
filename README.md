@@ -6,7 +6,7 @@
 
 Industrial equipment and materials tracking prototype for **SPACE EXSPACE Company** (Dammam, Saudi Arabia). Supports crane rentals, heavy containers, portable site offices, diesel generators, cleaning machinery, material inventory ledgers, and invoice pricing history.
 
----
+----
 
 ## Architecture at a Glance
 - **Monorepo**:
