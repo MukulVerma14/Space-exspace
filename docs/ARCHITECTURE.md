@@ -278,3 +278,9 @@ erDiagram
    - Materials inventory is stored as a single-entry, signed, append-only ledger in `stock_movements`.
 3. **No ORM (Raw Parameterised SQL)**: Direct SQL allows explicit control over partial indexes, CHECK constraints, multi-table transactions, and database views without leaky abstraction layers.
 4. **Defense in Depth**: Role boundaries (Admin vs Staff) are enforced server-side via data serialization guards, ensuring sensitive financial rates are never sent over the wire to unauthorized staff.
+
+
+
+
+
+Workflow for the integrated LLM
