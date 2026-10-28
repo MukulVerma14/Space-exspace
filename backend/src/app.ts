@@ -7,6 +7,9 @@ import { checkDbHealth } from './db/pool.js';
 import { authRouter } from './routes/authRoutes.js';
 import { ratesRouter } from './routes/ratesRoutes.js';
 import { equipmentRouter } from './routes/equipmentRoutes.js';
+import rentalsRouter from './routes/rentalsRoutes.js';
+import materialsRouter from './routes/materialsRoutes.js';
+import invoicesRouter from './routes/invoicesRoutes.js';
 
 export const app = express();
 
@@ -60,6 +63,15 @@ app.use('/api/rates', ratesRouter);
 
 // Equipment & QR tracking routes
 app.use('/api/equipment', equipmentRouter);
+
+// Rentals management routes
+app.use('/api/rentals', rentalsRouter);
+
+// Materials inventory & ledger routes
+app.use('/api/materials', materialsRouter);
+
+// Stored invoices & supplier purchasing routes
+app.use('/api/invoices', invoicesRouter);
 
 // 404 handler for unknown routes
 app.use((_req, res) => {

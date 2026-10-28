@@ -471,3 +471,110 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    curl -X GET http://localhost:5000/api/equipment/code/CRN-50-001 -H "Authorization: Bearer <TOKEN>"
    ```
    *Expected Result*: Returns complete equipment details, location history, and rental/repair status, with commercial rates stripped.
+
+---
+
+## Step 5: Rentals Lifecycle, Append-Only Materials Ledger, and Price History Tracking
+
+### What we built:
+- **Rentals Controller & Routes (`backend/src/controllers/rentalsController.ts`, `backend/src/routes/rentalsRoutes.ts`)**:
+  - `listRentals`: Paginated list of rental contracts with status (`quotation`, `confirmed`, `picked_up`, `returned`, `cancelled`) and customer party details.
+  - `getRentalById`: Detailed rental contract fetcher joining customer party, destination site, line items with physical equipment specs, and contract applied rates. Automatically scrubs pricing fields for staff callers via `sanitizeFinancials`.
+  - `createRental`: Admin-only rental contract creation with multi-item equipment reservation. Enforces a two-layer double-booking prevention check: pre-flight validation against `v_equipment_current` and engine-level constraint enforcement. Freezes contract-agreed rates on `rental_items.applied_rate`.
+  - `pickupRental`: Action-driven dispatch endpoint transitioning rental status to `'picked_up'` and writing append-only `location_log` entries moving all reserved equipment to the client job site.
+  - `returnRental`: Action-driven yard return endpoint updating `rental_items.returned_at = CURRENT_TIMESTAMP`, logging return entries into `location_log` back into the yard, and updating rental status to `'returned'`.
+- **Materials Controller & Routes (`backend/src/controllers/materialsController.ts`, `backend/src/routes/materialsRoutes.ts`)**:
+  - `listMaterials`: Consumables catalog computing live stock on hand dynamically via `COALESCE(SUM(sm.qty), 0)` from `stock_movements`, with low-stock filtering (`low_stock=true`) comparing on-hand balance against `reorder_level`.
+  - `getMaterialById`: Detailed SKU information with real-time stock balance.
+  - `getMaterialMovements`: Paginated immutable transaction log of all receipts, issues, adjustments, and returns for a material item.
+  - `recordStockMovement`: Endpoint allowing staff and admin to record physical stock transactions (`receipt`, `issue`, `adjustment`, `return`). Enforces signed numeric deltas and relies on PostgreSQL `BEFORE INSERT` trigger to reject any issue that would result in negative inventory (`INSUFFICIENT_STOCK`).
+  - `getMaterialPriceHistory`: Admin-only endpoint returning purchase price trends and chronological unit costs directly derived from received supplier invoice lines. Staff callers are rejected with HTTP 403 Forbidden.
+- **Invoices Controller & Routes (`backend/src/controllers/invoicesController.ts`, `backend/src/routes/invoicesRoutes.ts`)**:
+  - `listInvoices`: Filterable list of commercial invoices by direction (`issued` or `received`) and payment status (`unpaid`, `part_paid`, `paid`).
+  - `getInvoiceById`: Full invoice details with line items and party information.
+  - `createSupplierInvoice`: Admin-only atomic invoice recorder that stores received supplier bills, creates invoice line items with purchase unit prices, and atomically logs corresponding positive `receipt` stock movements in `stock_movements`.
+- **Express App Mount (`backend/src/app.ts`)**: Mounted `/api/rentals`, `/api/materials`, and `/api/invoices`.
+- **Comprehensive Integration Test Suite (`backend/src/__tests__/rentals_materials.test.ts`)**: 11 integration tests covering rental creation, pre-flight and constraint double-booking prevention, equipment dispatch/return, staff financial redaction, dynamic material stock aggregation, negative inventory rejection (HTTP 400), supplier invoice creation with stock linkage, and price history derivation. Includes automated cleanup in `afterAll` to protect database isolation.
+- **Architectural Decision Record**: Documented in `docs/decisions/007-rentals-materials-and-price-history.md`.
+- **API Reference**: Updated `docs/API.md` with request/response schemas for all 13 new endpoints (23 total endpoints).
+
+### Why it exists:
+- **Client Requirement**: Rental standard rates exist (hourly/daily/weekly/monthly, SAR) but the agreed rate per rental can differ (**CONFIRMED**).
+- **Client Requirement**: Materials tracked by quantity with protection against negative stock (**CONFIRMED**).
+- **Client Requirement**: Invoices stored, and material prices tracked over time (**CONFIRMED**).
+- **Client Requirement**: Admin full access (rates, rentals, invoices) vs Staff operational access only (**CONFIRMED**).
+- **Assumed Requirement**: Both supplier invoices (received) and customer invoices (issued) exist; store invoices only, do not generate them (**ASSUMED**).
+
+### Why this way:
+- **Derived Stock on Hand (`SUM(qty)`) & Trigger Defense instead of Mutable Counters**:
+  - *Alternative 1 Rejected (Mutable `items.current_stock` column)*: Updating a static counter (`UPDATE items SET current_stock = current_stock - 5`) destroys auditability. If the yard count disagrees with the screen, there is no immutable ledger to prove who moved what, when, or against which invoice. In our design, `SUM(qty)` guarantees 100% mathematical traceability.
+  - *Alternative 2 Rejected (Separate Standalone `material_prices` Table)*: Maintaining a detached table for price tracking risks divergence from actual legal accounts payable documents. Deriving price history from `invoice_lines` where `direction = 'received'` ensures all recorded historical price points are backed by actual supplier invoices.
+  - *Alternative 3 Rejected (Application-Only Stock Validation)*: Validating available quantity only in Node.js before issuing material creates race conditions: two yard technicians issuing 10 meters of cable concurrently when only 15 exist would both pass the JavaScript check. The PostgreSQL `BEFORE INSERT` trigger evaluates inside the database engine's lock, eliminating race conditions.
+
+### How it works:
+1. **Rental Contract Creation & Rate Freezing**:
+   - Admin sends `POST /api/rentals` with customer ID, destination site, dates, and equipment line items with `applied_rate`.
+   - Node.js queries `v_equipment_current` to ensure all machines are `'available'`. If any machine is rented or in repair, it returns HTTP 409 Conflict.
+   - Inside an atomic transaction (`BEGIN`):
+     - Inserts the master record into `rentals`.
+     - Inserts line items into `rental_items`, storing the agreed `applied_rate`.
+     - If concurrent requests attempt to book the same asset, the PostgreSQL partial unique index `uq_active_rental_item` rejects the second insert at the engine level.
+2. **Equipment Dispatch (`/pickup`) & Yard Check-in (`/return`)**:
+   - When cranes leave the yard, staff or admin calls `POST /api/rentals/:id/pickup`.
+   - The transaction updates `rentals.status = 'picked_up'` and appends relocation rows to `location_log` placing each machine at the client site.
+   - When the rental ends, calling `POST /api/rentals/:id/return` sets `rental_items.returned_at = CURRENT_TIMESTAMP`, writes return entries to `location_log` returning the machines to the yard, and updates rental status to `'returned'`.
+   - `v_equipment_current` immediately reflects the items as `'available'`.
+3. **Consumables Stock Movement & Zero-Deficit Trigger**:
+   - User posts `POST /api/materials/:id/movements` with `{ qty: 10, type: 'issue' }`.
+   - The controller converts `'issue'` to a signed negative number (`-10.000`) and issues `INSERT INTO stock_movements`.
+   - The PostgreSQL `BEFORE INSERT` trigger calculates `current_stock + NEW.qty`. If less than zero, it raises an exception with message `Stock cannot become negative`.
+   - The controller catches the trigger error and returns HTTP 400 Bad Request with code `INSUFFICIENT_STOCK`.
+4. **Supplier Invoice Recording & Automatic Material Receipt**:
+   - Admin sends `POST /api/invoices/supplier` with supplier ID, invoice number, totals, and lines.
+   - In a single transaction:
+     - The invoice and its `invoice_lines` are inserted.
+     - For each line linked to an inventory `item_id`, an automatic `receipt` is logged in `stock_movements(item_id, qty, type, invoice_line_invoice_id, invoice_line_no, unit_cost)`.
+     - Stock on hand increases automatically, and purchase price history is established immediately.
+
+### Concepts used:
+- **Two-layer concurrency guard**: Validating availability at the application layer for clear error messages, backed by a database unique constraint to prevent race conditions.
+- **Frozen contractual rate**: Storing the negotiated price directly on the transaction line item so future master rate changes cannot rewrite accounting history.
+- **Single-entry, signed, append-only ledger**: A data structure where records are only inserted and never updated or deleted, providing complete historical auditability.
+- **Database trigger constraint**: A stored procedure executed by the database engine immediately before or after a data modification event to enforce complex invariants.
+- **Derived price history**: Computing historical trends directly from primary transaction documents (supplier invoices) rather than a secondary cache.
+
+### Risks and assumptions:
+- **Assumption**: Rental agreements are stored for physical tracking and commercial documentation; generating customer PDF invoices or ZATCA XML e-invoices is out of scope for this prototype (**CONFIRMED**).
+- **Risk**: Overlapping future reservations (e.g. reserving crane A for next month while crane A is rented this week) are not scheduled or calendar-blocked in this prototype; only concurrent physical rentals are prevented via `returned_at IS NULL`.
+- **Performance Trade-off**: Aggregating `SUM(sm.qty)` across `stock_movements` on every material catalog query is fast for prototype volumes (<10,000 movements). At enterprise scale (millions of movements), this would require periodic balance snapshots or a materialized view.
+
+### 30-second explanation:
+> *"We built the complete rental lifecycle and materials inventory system. When a crane goes on rent, the agreed price is locked permanently so future rate increases never change old contracts. An asset can never be double-booked because the database physically blocks it. For materials like cables and paints, there is no editable stock counter that workers can tamper with; every single receipt and issue is logged, and the database makes it physically impossible to issue more material than what is physically in the yard."*
+
+### Likely questions:
+1. **"Why do we calculate stock on hand using `SUM(qty)` on `stock_movements` instead of an `items.current_stock` column?"**
+   *Answer*: A mutable `current_stock` column creates audit black holes and concurrency bugs. If an inventory count drops by 20, nobody knows whether it was issued to a job, stolen, or accidentally updated by a user. By using a single-entry, signed, append-only ledger, the current balance is simply the mathematical sum of every physical movement. Every screw, cable, and drum of paint has an immutable audit trail showing who moved it, when, and against which invoice or work order.
+2. **"How does the system prevent renting the same 50-ton crane to two different clients at the same time?"**
+   *Answer*: We implement two layers of defense. First, the application queries `v_equipment_current` before creating a rental to return a friendly HTTP 409 Conflict if an asset is unavailable. Second, the database has a partial unique index: `CREATE UNIQUE INDEX uq_active_rental_item ON rental_items (equipment_id) WHERE returned_at IS NULL`. Even if two dispatchers click 'Confirm Rental' on the exact same millisecond, the database engine accepts the first and strictly aborts the second.
+3. **"Where does material price tracking come from, and why didn't you build a separate price history table?"**
+   *Answer*: Material price history is derived directly from the line items of received supplier invoices (`direction = 'received'`). If we created a separate `material_prices` table, someone could type in a price that doesn't match the actual bill received from the supplier. Deriving price history directly from registered supplier invoices guarantees that every price point displayed to management is backed by an actual legal purchase invoice.
+
+### How to verify:
+1. Run the entire automated test suite:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 6 test suites pass cleanly (**55 tests passed**), including all 11 tests in `rentals_materials.test.ts`.
+2. Verify TypeScript type checking:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: `tsc --noEmit` exits with 0 errors.
+3. Verify negative inventory rejection via API:
+   - Attempting to issue more material than available in `stock_movements` returns HTTP 400 Bad Request with:
+     ```json
+     {
+       "error": "INSUFFICIENT_STOCK",
+       "message": "Stock cannot become negative"
+     }
+     ```
