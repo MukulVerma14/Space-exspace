@@ -1,0 +1,22 @@
+{
+  "name": "SPACE EXSPACE Tracker",
+  "short_name": "EX Tracker",
+  "description": "Equipment & Materials Tracker — SPACE EXSPACE Company",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f1117",
+  "theme_color": "#0f1117",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
