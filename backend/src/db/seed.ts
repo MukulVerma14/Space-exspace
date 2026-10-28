@@ -428,7 +428,7 @@ export async function seedDatabase() {
       );
       if (riCheck.rows.length > 0) {
         await client.query(
-          `UPDATE rental_items SET applied_rate = $3, rate_unit = $4, discount_note = $5
+          `UPDATE rental_items SET applied_rate = $3, rate_unit = $4, discount_note = $5, returned_at = NULL
            WHERE rental_id = $1 AND equipment_id = $2`,
           [rental1Id, eqId, item.rate, item.unit, item.note]
         );
@@ -512,7 +512,7 @@ export async function seedDatabase() {
       );
       if (r3ItemCheck.rows.length > 0) {
         await client.query(
-          `UPDATE rental_items SET applied_rate = 1600.00, rate_unit = 'daily'
+          `UPDATE rental_items SET applied_rate = 1600.00, rate_unit = 'daily', returned_at = NULL
            WHERE rental_id = $1 AND equipment_id = $2`,
           [rental3Id, eqId]
         );

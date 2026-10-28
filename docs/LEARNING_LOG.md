@@ -36,8 +36,7 @@ This document records every step of building the SPACE EXSPACE equipment and mat
 
 ### How it works:
 1. When the backend starts (`npm run dev`), Node.js executes `src/server.ts`.
-2. `src/server.ts` immediately imports `src/config/env.ts`, which reads `.env` and passes all variables through the Zod schema. If any variable is missing or malformed, the process halts immediately with exit code 1.
-3. Express configures Helmet security headers, CORS permissions, body parsers, and Pino HTTP logging.
+2. `src/server.ts` immediately imports `src/config/env.ts`, which reads `.env` and passes all variables through the Zod schema. If any variable is missing or malformed, the process halts immediately with exit code 1.\n3. Express configures Helmet security headers, CORS permissions, body parsers, and Pino HTTP logging.
 4. When a monitoring agent or user requests `GET /health`, `app.ts` calls `checkDbHealth()`, which borrows a client from `pg.Pool` and executes `SELECT 1`.
 5. If the database responds, `GET /health` responds with HTTP 200 and latency metrics; if unreachable, it returns HTTP 503 Service Unavailable.
 
@@ -75,7 +74,7 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    ```
    *Expected Result*: Clean compilation with 0 errors.
 
----\
+---
 
 ## Step 1: Relational Database Migrations, 3NF Normalization, Constraints, and Derived View
 
@@ -142,7 +141,7 @@ This document records every step of building the SPACE EXSPACE equipment and mat
     - Supports both issued (customer) and received (supplier) invoices.
     - `invoice_lines` records `quantity`, `unit_id`, and `unit_price`. Lines from supplier invoices provide an automated, immutable record of material price fluctuations over time.
 14. **`stock_movements` (Single-Entry, Signed, Append-Only Ledger Pattern)**:
-    - Stock is NEVER stored as a static, mutable number in `items``.
+    - Stock is NEVER stored as a static, mutable number in `items`.
     - Every transaction (receipt from supplier, issue to workshop, adjustment, return) writes a signed row. Stock on hand is always `SUM(qty)`.
     - Database trigger ensures `SUM(qty)` can never drop below zero.
 
@@ -175,11 +174,11 @@ This document records every step of building the SPACE EXSPACE equipment and mat
 > *\"Instead of having workers manually type whether a machine is 'available' or 'rented'—which causes human errors and double bookings—the database figures out the status automatically. If there is an active rental agreement that is confirmed or picked up, it is rented. If a repair ticket is open, it is under repair. If neither, it is available. And at the database level, it is physically impossible to rent a crane that is already checked out to another client.\"*
 
 ### Likely questions:
-1. **\"Why didn't you put the equipment's current location and current status directly into the `equipment` table?\"**\
+1. **\"Why didn't you put the equipment's current location and current status directly into the `equipment` table?\"**
    *Answer*: That would create two sources of truth. If someone updates the rental table or moves a crane, but the application crashes before updating the status column on the equipment table, the two records contradict each other. By deriving status and location dynamically from the audit logs and active rental contracts in `v_equipment_current`, the status is always mathematically guaranteed to match operational reality.
-2. **\"Why do we store `applied_rate` on `rental_items` if we already have a `rates` table?\"**\
+2. **\"Why do we store `applied_rate` on `rental_items` if we already have a `rates` table?\"**
    *Answer*: Standard rates change over time due to inflation or management decisions. If a customer signs a contract today for 1,200 SAR/day, and six months from now SPACE EXSPACE raises standard crane rates to 1,500 SAR/day, past rental contracts and customer invoices must still reflect the agreed 1,200 SAR. Storing `applied_rate` on the line item permanently seals the agreed financial transaction.
-3. **\"How does the database prevent someone from issuing material when there isn't enough in the yard?\"**\
+3. **\"How does the database prevent someone from issuing material when there isn't enough in the yard?\"**
    *Answer*: Materials are tracked in a single-entry, signed, append-only ledger (`stock_movements`), where stock on hand is `SUM(qty)`. We attached a PostgreSQL `BEFORE INSERT` trigger to `stock_movements`. If a technician attempts to issue 50 meters of conduit when only 20 are available, the trigger calculates the deficit and raises an immediate SQL error, rolling back the transaction before any bad data can be written.
 
 ### How to verify:
@@ -259,11 +258,11 @@ This document records every step of building the SPACE EXSPACE equipment and mat
 > *\"We built an idempotent demo seed script that loads the entire system with realistic industrial data from Dammam—crane models from Tadano and Liebherr, generators from Cummins, fictional industrial client sites, and mock tax IDs. Best of all, it's completely safe: you can run it as many times as you want before a client meeting or interview, and it will never crash, duplicate records, or run in production by mistake.\"*
 
 ### Likely questions:
-1. **\"What does 'idempotent' mean in the context of a seed script, and why is it crucial?\"**\
+1. **\"What does 'idempotent' mean in the context of a seed script, and why is it crucial?\"**
    *Answer*: Idempotency means running the script multiple times produces the exact same clean database state without crashing with unique constraint errors or creating duplicate records. In client demos or test pipelines, developers frequently need to reset or refresh sample data; an idempotent script guarantees that running `npm run seed` is always 100% safe.
-2. **\"Why do we see 7 rented items, 2 under repair, and 32 available in `v_equipment_current` when the seed script never wrote the word 'available' or 'rented' into an equipment table?\"**\
+2. **\"Why do we see 7 rented items, 2 under repair, and 32 available in `v_equipment_current` when the seed script never wrote the word 'available' or 'rented' into an equipment table?\"**
    *Answer*: That demonstrates our derived state architecture. The seed script created 2 active rentals containing 5 and 2 items respectively (7 items currently rented), and 2 open repair tickets with no close date at the Dammam workshop. The view joined these immutable events and mathematically derived the status on the fly. No two sources of truth exist.
-3. **\"Where are the passwords for the admin and staff users stored, and how does the server authenticate them?\"**\
+3. **\"Where are the passwords for the admin and staff users stored, and how does the server authenticate them?\"**
    *Answer*: Plaintext passwords are never stored in the database. The seed script hashes them using `bcrypt` with 10 salt rounds and stores only the 60-character cryptographic hash in `users.password_hash`. When a user logs in, `bcrypt.compare` compares the supplied password with the hash. The dev passwords are documented solely in `README.md` for local testing.
 
 ### How to verify:
@@ -355,11 +354,11 @@ This document records every step of building the SPACE EXSPACE equipment and mat
 > *\"We built a secure authentication system that gives office admins full control over equipment rates while physically preventing yard staff from seeing any financial figures. And unlike systems that just hide prices with CSS or JavaScript in the browser—where any curious worker can open browser Developer Tools and read the prices—our backend server strips all rates and prices from the network response before sending it. Even if staff inspect the raw network packets, the rates do not exist.\"*
 
 ### Likely questions:
-1. **\"Why can't we just hide the rates in the React frontend using `{user.role === 'admin' && <RateDisplay />}`?\"**\
+1. **\"Why can't we just hide the rates in the React frontend using `{user.role === 'admin' && <RateDisplay />}`?\"**
    *Answer*: Hiding data in the frontend is cosmetic, not security. If the backend sends `{ asset_code: 'CRN-50-001', applied_rate: 1200.00 }`, anyone using Chrome DevTools or inspecting the network response can see the rate regardless of what the UI renders. True security requires server-side serialization so that sensitive financial keys are physically omitted before the JSON payload is transmitted over the network.
-2. **\"Why does your JWT authentication middleware query PostgreSQL on every request if JWTs are supposed to be stateless?\"**\
+2. **\"Why does your JWT authentication middleware query PostgreSQL on every request if JWTs are supposed to be stateless?\"**
    *Answer*: While JWTs carry claims statelessly, pure stateless tokens have a serious flaw: if an employee is terminated and their access needs to be revoked immediately, the token remains valid until it expires. By doing a single indexed primary key query (`WHERE id = $1 AND active = true`), we achieve instant account revocation without losing the simplicity of JWT tokens.
-3. **\"How does your system prevent brute-force password guessing attacks on the login endpoint?\"**\
+3. **\"How does your system prevent brute-force password guessing attacks on the login endpoint?\"**
    *Answer*: We implemented IP-based rate limiting via `express-rate-limit` on `POST /api/auth/login`. It allows a maximum of 10 login attempts per 15-minute window per IP. If exceeded, it halts further attempts with HTTP 429 Too Many Requests. Additionally, login failures return an identical generic error message (`Invalid email or password`) to prevent username enumeration.
 
 ### How to verify:
@@ -373,3 +372,102 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    npm --workspace=backend run lint
    ```
    *Expected Result*: `tsc --noEmit` exits with 0 errors.
+
+---
+
+## Step 4: Equipment API, QR Code Resolution, and Action-Driven State Transitions
+
+### What we built:
+- **Equipment Controller (`backend/src/controllers/equipmentController.ts`)**:
+  - `listEquipment`: Paginated fleet catalog with multi-facet filtering (`status`, `type_id`, `location_id`, `condition`) and case-insensitive substring search (`q`) across make, model, and asset code.
+  - `getEquipmentByAssetCode`: Natural key QR scan resolution endpoint resolving `asset_code` (e.g. `CRN-50-001`) to complete physical specs, latest 10 movements from `location_log`, active rental agreement details (if rented), open maintenance order (if under repair), and commercial rate cards (scrubbed for staff via `sanitizeFinancials`).
+  - `moveEquipment`: Physical relocation action recording a new immutable entry in `location_log`.
+  - `returnEquipment`: Yard return action setting `rental_items.returned_at = NOW()`, logging a yard arrival in `location_log`, recording machine condition, and auto-updating rental status to `'returned'` when all items are checked in.
+  - `sendToRepair`: Workshop dispatch action creating a new open row in `maintenance` (`closed_at IS NULL`), logging relocation to workshop in `location_log`, and setting condition to `'needs_repair'`.
+- **Equipment Routing (`backend/src/routes/equipmentRoutes.ts`)**:
+  - Mounted at `/api/equipment` in `backend/src/app.ts`.
+  - Secured with JWT `authenticate` middleware. Staff role has permission to browse equipment, resolve QR scans, and trigger physical actions (`move`, `return`, `repair`).
+- **Comprehensive Automated Test Suite (`backend/src/__tests__/equipment.test.ts`)**:
+  - 14 integration tests covering listing, search, filtering, pagination, QR scan resolution, staff financial scrubbing, relocation, return with rental completion, maintenance opening, and 409 conflict checks.
+- **Architectural Decision Record**: Documented in `docs/decisions/006-action-driven-state-transitions-and-qr-resolution.md`.
+- **API Reference**: Updated `docs/API.md` with complete request/response schemas for `/api/equipment` endpoints.
+
+### Why it exists:
+- **Client Requirement**: Mobile access for yard staff to scan a QR code on an item, view details, and update location/status (**CONFIRMED**).
+- **Client Requirement**: Web dashboard for office staff to search, filter, and inspect fleet inventory (**CONFIRMED**).
+- **Client Requirement**: Staff must never see commercial rates or prices (**CONFIRMED**).
+- **Architectural Principle**: Status is derived by physical actions, never by editing a status string (**CONFIRMED**).
+
+### Why this way:
+- **Action-Driven Endpoints instead of Generic CRUD / Status Mutation**:
+  - *Alternative 1 Rejected (Generic `PATCH /api/equipment/:id` with `{ status: 'available' }`)*: Allowing direct mutation of a `status` field bypasses domain rules, breaks audit trails, and creates duplicate sources of truth. If a staff member marks a rented crane as "available" without returning the rental item, the rental contract still claims the crane is out, corrupting both billing and dispatch.
+  - *Alternative 2 Rejected (Encoding Database Autoincrement ID in QR Codes e.g. `qr://equipment/42`)*: Surrogate integer IDs are internal database implementation details. If equipment data is re-seeded or migrated to another database cluster, surrogate IDs change and all physical stickers printed on 145 cranes and containers become useless. Natural keys (`asset_code` like `CRN-50-001`) survive database migrations and match the painted stencils on the machines.
+  - *Alternative 3 Rejected (Separate non-transactional database updates)*: Returning equipment requires updating `rental_items`, inserting a `location_log` row, and updating equipment condition. If these are executed as separate queries without a transaction, a crash midway leaves an item in a broken, half-returned state. We execute all multi-table mutations inside atomic `BEGIN ... COMMIT` transactions.
+
+### How it works:
+1. **QR Scan & Resolution**:
+   - Field worker scans the physical QR sticker on a crane with their phone camera.
+   - The scanner decodes the natural string `CRN-50-001`.
+   - The mobile PWA sends `GET /api/equipment/code/CRN-50-001`.
+   - The server queries `v_equipment_current` to fetch specs, current yard/site, and derived status (`rented`, `available`, or `under_repair`).
+   - The server concurrently fetches the last 10 location movements from `location_log`.
+   - If the machine is rented, active rental contract details are attached. If under repair, open maintenance ticket details are attached.
+   - If the requester is an admin, standard rate cards are included. If staff, `sanitizeFinancials` scrubs all rates and pricing before JSON transmission.
+2. **Move Equipment**:
+   - Staff selects a new location and submits `POST /api/equipment/:id/move` with `{ location_id, note }`.
+   - The controller inserts a new row into `location_log(equipment_id, location_id, moved_by, moved_at, note)`.
+   - The next query to `v_equipment_current` immediately reflects the new location because its `DISTINCT ON` subquery finds this latest movement row.
+3. **Return Equipment**:
+   - Staff returns a rented generator to a yard via `POST /api/equipment/:id/return` with `{ location_id, condition, note }`.
+   - Inside an atomic transaction (`BEGIN`):
+     - Sets `rental_items.returned_at = NOW()`.
+     - Appends a return event in `location_log`.
+     - Updates `equipment.condition`.
+     - Checks if all items on the parent rental agreement have now returned; if so, updates `rentals.status = 'returned'`.
+     - Commits the transaction (`COMMIT`).
+   - When `v_equipment_current` is queried, `rental_items WHERE returned_at IS NULL` no longer matches this item, so its status immediately transitions from `'rented'` to `'available'` (or `'under_repair'` if damaged).
+4. **Send to Repair**:
+   - Staff flags a damaged machine via `POST /api/equipment/:id/repair` with `{ description, workshop_location_id, kind }`.
+   - Inside a transaction:
+     - Rejects the request if the machine already has an active repair (`409 Conflict`).
+     - Inserts a new row in `maintenance(equipment_id, kind, description, opened_at, reported_by)`.
+     - Inserts a relocation record in `location_log` moving the machine to the workshop.
+     - Updates `equipment.condition = 'needs_repair'`.
+   - `v_equipment_current` now sees an open maintenance record (`closed_at IS NULL`) and instantly derives `status = 'under_repair'`.
+
+### Concepts used:
+- **Action-driven architecture (Task-based API)**: Exposing intent-specific endpoints (`/move`, `/return`, `/repair`) representing real-world business actions rather than generic data-manipulation endpoints (`PUT /equipment/:id`).
+- **Natural key resolution**: Looking up resources by permanent real-world identifiers (`asset_code`) rather than arbitrary internal database auto-increment IDs.
+- **Atomic transaction**: A database sequence (`BEGIN ... COMMIT`) that guarantees all operations execute successfully together, or none execute at all (`ROLLBACK`), preventing corrupt partial states.
+- **Single source of truth**: Architectural principle that state is stored in only one canonical place or derived from underlying events, eliminating conflicting records.
+- **Paginated querying**: Returning subsets of large result sets using `LIMIT` and `OFFSET` (alongside `total` counts) to conserve memory and network bandwidth.
+
+### Risks and assumptions:
+- **Assumption**: QR stickers encode plain text natural keys (`CRN-50-001`) rather than complete URLs (`https://app.spaceexspace.com/equipment/CRN-50-001`). This keeps QR codes smaller, denser, and easier to scan with mobile cameras in bright Saudi sunlight or dusty yard conditions.
+- **Risk**: Returning an item updates `rental_items.returned_at`, but doesn't calculate late return penalty fees or diesel refills. Those are handled at invoice generation time in office operations.
+
+### 30-second explanation:
+> *\"In our system, workers never edit a dropdown to say a crane is 'available' or 'rented'—because someone always forgets or picks the wrong option. Instead, the system mirrors reality: when a worker scans a crane's QR code and clicks 'Return to Yard', the server marks the rental agreement as returned and logs the machine's arrival at the Dammam yard. The database instantly recognizes the crane is back and marks it available for the next client automatically.\"*
+
+### Likely questions:
+1. **\"Why did you create separate endpoints for `/move`, `/return`, and `/repair` instead of a single `PATCH /api/equipment/:id` endpoint?\"**
+   *Answer*: A generic `PATCH` endpoint allows clients to modify internal columns directly, which invites data corruption. If a client sends `PATCH /equipment/1` with `{ status: 'available' }`, the equipment status changes, but the rental item record still says it is on rent to a customer, creating a contradiction. Task-based action endpoints enforce real-world business workflows inside atomic transactions, guaranteeing that audit logs, rental lines, and maintenance tickets are updated in complete synchronization.
+2. **\"Why does the QR code store the `asset_code` string rather than the database primary key `id`?\"**
+   *Answer*: Primary keys (`id`) are internal surrogate integers generated by the database sequence. If we migrate data to a new database or re-seed the system, surrogate IDs can shift, which would invalidate all printed plastic QR stickers on 145 cranes and containers. Natural business keys like `CRN-50-001` are permanent, visible on physical stencils, and completely decoupled from database internals.
+3. **\"What happens if a worker tries to send a crane to repair when it is already marked under repair?\"**
+   *Answer*: The `sendToRepair` endpoint checks for an active maintenance ticket where `closed_at IS NULL` and returns HTTP 409 Conflict with the active ticket ID. Furthermore, our database schema enforces a partial unique index `idx_maintenance_active_unique` on `maintenance(equipment_id) WHERE closed_at IS NULL`, making it mathematically impossible to open duplicate concurrent repair tickets even under race conditions.
+
+### How to verify:
+1. Run all backend test suites:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 5 test suites pass cleanly (**44 tests passed**), including all 14 tests in `equipment.test.ts`.
+2. Test QR code resolution directly via cURL or API client:
+   ```bash
+   # Log in as staff
+   curl -X POST http://localhost:5000/api/auth/login -H "Content-Type: application/json" -d "{\"email\":\"staff@spaceexspace.com\",\"password\":\"Staff@12345\"}"
+   # Scan equipment CRN-50-001 using the returned Bearer token
+   curl -X GET http://localhost:5000/api/equipment/code/CRN-50-001 -H "Authorization: Bearer <TOKEN>"
+   ```
+   *Expected Result*: Returns complete equipment details, location history, and rental/repair status, with commercial rates stripped.

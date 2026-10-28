@@ -6,6 +6,7 @@ import { httpLogger } from './utils/logger.js';
 import { checkDbHealth } from './db/pool.js';
 import { authRouter } from './routes/authRoutes.js';
 import { ratesRouter } from './routes/ratesRoutes.js';
+import { equipmentRouter } from './routes/equipmentRoutes.js';
 
 export const app = express();
 
@@ -56,6 +57,9 @@ app.use('/api/auth', authRouter);
 
 // Rates & commercial terms routes
 app.use('/api/rates', ratesRouter);
+
+// Equipment & QR tracking routes
+app.use('/api/equipment', equipmentRouter);
 
 // 404 handler for unknown routes
 app.use((_req, res) => {
