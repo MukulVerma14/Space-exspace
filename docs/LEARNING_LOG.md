@@ -578,3 +578,77 @@ This document records every step of building the SPACE EXSPACE equipment and mat
        "message": "Stock cannot become negative"
      }
      ```
+
+---
+
+## Step O1: Idempotent Events, Client-Generated UUIDs, and Occurred-Time Ordering
+
+### What we built:
+- **Offline Events Ledger Migration (`backend/migrations/1730000000001_offline_sync_events.sql`)**:
+  - `sync_events` table with client-generated UUID primary key (`client_event_id`), `user_id`, `type`, `payload` (JSONB), `status` (`accepted`, `rejected`, `duplicate`), `result` (JSONB), `occurred_at`, and `recorded_at`.
+  - Added `recorded_at` column (`TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP`) to both `location_log` and `stock_movements`.
+  - Updated derived state view `v_equipment_current` to order location movements strictly by physical occurred time (`moved_at DESC, recorded_at DESC, id DESC`), ensuring a stale device syncing an old movement cannot overwrite a newer movement.
+- **Sync Event Service (`backend/src/services/syncEventService.ts`)**:
+  - `findSyncEventById`: Queries `sync_events` by `client_event_id` to detect previously processed events.
+  - `persistSyncEvent`: Atomically writes the processed event and its outcome into `sync_events`.
+- **Automated Verification Suite (`backend/src/__tests__/offline_events.test.ts`)**:
+  - Integration tests verifying table schema, UUID primary key, status check constraints, presence of `recorded_at` in audit ledgers, event replay idempotency, and proof that a stale device syncing an old move at 08:00 AM does not displace a newer move at 10:00 AM in `v_equipment_current`.
+- **Architectural Decision Record**: Documented in `docs/decisions/008-client-generated-uuids-and-offline-event-ordering.md`.
+
+### Why it exists:
+- **Client Requirement**: Mobile access for yard staff to scan a QR code and update location/status, functioning even in remote yards or basement workshops with intermittent or zero cellular connectivity (**CONFIRMED**).
+- **Core Reliability**: Field staff will send actions when disconnected; when reconnected, network retries and duplicate transmissions must not create duplicate equipment movements or duplicate stock deductions (**CONFIRMED**).
+- **Audit & Timeline Integrity**: Audit ledgers must track both when an event physically happened in the yard (`moved_at`) and when the server received and recorded it (`recorded_at`) (**CONFIRMED**).
+
+### Why this way:
+- **Client-Generated UUIDs & Occurred-Time Ordering instead of Server Timestamps**:
+  - *Alternative 1 Rejected (Server-Assigned Sequential IDs)*: If the server generates IDs, the mobile device cannot tag its retried HTTP requests with an immutable identifier before sending them. A dropped TCP connection midway through an HTTP response would cause the phone to retry, creating two identical moves or double-deducting stock.
+  - *Alternative 2 Rejected (Ordering by Server Arrival Time `recorded_at DESC` or `id DESC`)*: In field operations across Dammam and Jubail, workers go offline for hours. If Worker A relocates a crane at 10:00 AM while online, and Worker B moved it at 08:00 AM while offline and syncs at 11:00 AM, server-arrival ordering would overwrite Worker A's newer move with Worker B's older move.
+  - *Alternative 3 Rejected (Natural Composite Keys e.g. `hash(user_id, equipment_id, timestamp)`)*: Easily collides if a worker moves multiple items within the same second or if clocks have coarse granularity. UUID v4 provides 122 bits of cryptographic randomness generated entirely on the device.
+
+### How it works:
+1. **Offline Capture**:
+   - The field technician's device detects an offline state and saves the action locally.
+   - The device assigns a fresh UUID v4 as `client_event_id` and records the current local device time as `occurred_at`.
+2. **Sync / Replay**:
+   - When connection is restored, the device posts the event with its `client_event_id`.
+   - The server inspects `sync_events WHERE client_event_id = $1`.
+   - If found, the server immediately returns the previously persisted `status` and `result`, performing zero writes to `location_log` or `stock_movements`.
+   - If not found, the server processes the event, writes `location_log` with `moved_at = occurred_at` and `recorded_at = NOW()`, and records the result in `sync_events`.
+3. **Timeline Resolution in `v_equipment_current`**:
+   - The view executes `DISTINCT ON (equipment_id) ... ORDER BY ll.equipment_id, ll.moved_at DESC, ll.recorded_at DESC, ll.id DESC`.
+   - Physical reality is preserved: the movement with the latest `moved_at` wins, regardless of when it arrived at the server.
+
+### Concepts used:
+- **Idempotency**: A property of an operation whereby it can be applied multiple times without changing the result beyond the initial application.
+- **Client-generated UUID**: A unique identifier generated on the client prior to network transmission, allowing retries to reference the identical logical intent.
+- **Bi-temporal data modeling**: Tracking two separate time dimensions for an event: business time (when it occurred in the real world: `moved_at`) and system time (when the database recorded it: `recorded_at`).
+- **Last-Write-Wins (LWW) by physical occurrence**: Resolving conflicting state updates by selecting the event with the latest physical timestamp rather than server arrival time.
+- **Idempotent replay ledger**: A database table storing the execution outcomes of previous requests to short-circuit repeated attempts.
+
+### Risks and assumptions:
+- **Assumption**: Device clocks on yard workers' mobile phones are reasonably accurate (synchronized via NTP or cellular networks). Step O2 introduces a 5-minute future clock skew safeguard.
+- **Risk**: If two workers physically relocate the same machine while both are offline in different yards, the one with the later physical timestamp wins in `v_equipment_current`. This conflict resolution policy will be formally addressed in ADR 009 in Step O2.
+
+### 30-second explanation:
+> *"When a yard worker moves a crane while their phone has no signal, their phone assigns a unique fingerprint (a UUID) and marks the exact time the move happened. When they get back into Wi-Fi range and upload their work, the server checks if that fingerprint was already processed—so bad cellular connections never accidentally move a crane twice. And even if an old move from two hours ago uploads late, the database knows it's an old move and won't let it overwrite a newer move made by someone else."*
+
+### Likely questions:
+1. **"Why does the mobile app generate the event UUID instead of letting the PostgreSQL database generate it with `gen_random_uuid()`?"**
+   *Answer*: If the server generates the ID, the client has no way to prove that a re-sent network request is a retry of the same action. If a mobile network connection drops right after the server processes an insert but before the phone receives the HTTP 200 response, the phone must retry. If the phone generates the UUID before transmitting, both attempts send the exact same UUID. The server recognizes the UUID on the second attempt, skips inserting, and returns the cached success response.
+2. **"Why did we add `recorded_at` to `location_log` when we already had `moved_at`?"**
+   *Answer*: This is the bi-temporal modeling pattern. `moved_at` represents real-world physical time—when the crane was unhooked and driven to the new yard. `recorded_at` represents database transaction time—when the central server actually found out about it. Having both is essential for operational audits: we can see that a crane was moved at 8:00 AM in the yard, but only synced to the office at 11:30 AM when the driver reached Wi-Fi.
+3. **"What stops a phone with an incorrectly set future date (e.g. year 2030) from permanently locking an equipment's location in `v_equipment_current`?"**
+   *Answer*: Because `v_equipment_current` orders by `moved_at DESC`, an event with a malicious or broken future timestamp would dominate the view. In Step O2, the sync endpoint enforces a clock-skew validation rule: any event with `occurred_at` more than 5 minutes in the future relative to server time is strictly rejected.
+
+### How to verify:
+1. Run all backend test suites:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 7 test suites pass cleanly (**59 tests passed**), including all 4 tests in `offline_events.test.ts`.
+2. Verify TypeScript type checking:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: `tsc --noEmit` exits with 0 errors.
