@@ -839,3 +839,78 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    curl -i -H "Authorization: Bearer <STAFF_JWT>" -H 'If-None-Match: W/"..."' http://localhost:3000/api/sync/snapshot
    # Expected: HTTP/1.1 304 Not Modified
    ```
+
+---
+
+## Step O4: Comprehensive Offline Test Suite, Multi-Device Concurrency, and DevTools Demo Guide
+
+### What we built:
+- **Comprehensive Integration Test Suite (`backend/src/__tests__/offline_events.test.ts`)**:
+  - Expanded the offline events test suite to **24 thorough integration tests** covering all critical field failure modes:
+    1. **Stale Device Syncing an Old Move**: Worker A moves a crane offline at 08:00 AM; Worker B moves the crane online at 09:30 AM to a workshop. Worker B's move syncs first; Worker A's move syncs later at 11:00 AM. The test proves Worker A's move is accepted into `location_log` for auditability, but `v_equipment_current` strictly preserves the Workshop location because 09:30 AM > 08:00 AM.
+    2. **Out-of-Order Interleaved Batch Replay**: An offline batch containing valid receipts, valid issues, and an overdraw issue sent intentionally in non-chronological order. Proves the server sorts by `occurred_at ASC`, executes valid transactions, rejects the overdraw with `INSUFFICIENT_STOCK`, and updates the inventory ledger accurately without dropping events.
+    3. **Batch Idempotency Across Multiple Replays**: A multi-event batch re-executed identically returns `status: 'duplicate'` with matching stored results and zero duplicate rows written to `location_log` or `stock_movements`.
+    4. **Domain Precondition Rejection (Double Repair)**: Rejects sending an asset to repair if it is already under an active maintenance work order (`ALREADY_UNDER_REPAIR`) and records the failure in `sync_events`.
+- **End-to-End Offline Demonstration Guide (`docs/DEMO.md`)**:
+  - Comprehensive guide documenting how to simulate offline field conditions using Browser DevTools (**Network > Throttling > Offline**).
+  - Detailed 7-step walkthrough covering initial login, snapshot caching, offline queuing, auto-reconnection flushing, idempotency proofs, multi-device conflict resolution, and HTTP 304 ETag caching.
+  - **Explicit Invariant Documented**: Highlights that the very first login strictly requires internet connectivity for server-side credential verification and JWT issuance before heading into offline coverage zones.
+- **Architectural Decision Record**: Documented in `docs/decisions/011-offline-client-lifecycle-and-first-login-dependency.md`.
+
+### Why it exists:
+- **Client Requirement**: Mobile access for yard staff to scan a QR code and update location/status, functioning even in remote yards or basement workshops with intermittent or zero cellular connectivity (**CONFIRMED**).
+- **Client Requirement**: High operational reliability where network drops and device clock differences never corrupt inventory ledgers or misplace heavy fleet assets (**CONFIRMED**).
+- **Demonstrability & Verification**: Product owners, stakeholders, and developers need an authoritative, repeatable procedure to test offline workflows on local machines without driving to remote dead zones.
+
+### Why this way:
+- **Automated Integration Testing over Unit Mocking**:
+  - *Alternative 1 Rejected (Mocking DB queries in unit tests)*: Multi-device concurrency, timestamp ordering in PostgreSQL views, and transaction rollbacks cannot be reliably verified with in-memory mocks. Testing against the real PostgreSQL database engine proves true runtime correctness.
+- **Browser DevTools Emulation over Physical Airplane Mode**:
+  - *Alternative 2 Rejected (Requiring physical Wi-Fi disconnections)*: Browser DevTools network throttling provides a standardized, zero-hardware environment for developers and testers to observe network error handling, IndexedDB queuing, and batch flushing.
+
+### How it works:
+1. Technicians authenticate online once to receive their JWT token and cache the initial operational snapshot (`GET /api/sync/snapshot`).
+2. Technicians enter offline areas. Physical scans and issues are recorded locally in IndexedDB with client-generated UUIDs and timestamps.
+3. Upon reconnecting, the client flushes queued events to `POST /api/sync`.
+4. The server validates and processes events in chronological order, isolating each event in a distinct transaction.
+5. If another technician moved the asset at a later physical time, `v_equipment_current` retains the latest location while storing both movements in the audit log.
+6. The client receives explicit per-event statuses (`accepted`, `duplicate`, `rejected`) and updates its local UI accordingly.
+
+### Concepts used:
+- **Bi-Temporal Concurrency Ordering**: Using physical occurrence time (`moved_at`) for current operational state while recording system arrival time (`recorded_at`) for audit compliance.
+- **Fail-Partial Transaction Isolation**: Processing batch items in independent transactions so valid field entries are never rolled back by an adjacent precondition failure.
+- **Browser Network Throttling Emulation**: Leveraging Chromium/WebKit DevTools network stack interception to simulate field cellular dead zones.
+- **Zero-Trust Client Authentication**: Enforcing server-side credential validation and cryptographic token issuance rather than storing password hashes on mobile clients.
+
+### Risks and assumptions:
+- **Assumption**: Field workers authenticate and synchronize their initial snapshot before departing dispatch offices or areas with cell coverage (**CONFIRMED**).
+- **Risk**: If two technicians offline simultaneously attempt to issue the very last unit of a spare part, the first device to regain cellular signal and sync will succeed; the second will receive `INSUFFICIENT_STOCK` and require physical yard reconciliation.
+
+### 30-second explanation:
+> *"We built the comprehensive automated test suite and the developer demo guide for offline field operations. Our tests prove that if a worker's phone stays offline for three hours and syncs an old crane move after another worker already moved it online, the server records the history but never lets the stale phone overwrite the crane's true location. The demo guide shows anyone how to simulate being completely offline using browser DevTools with zero setup, while explaining why the very first login must always happen online."*
+
+### Likely questions:
+1. **"Can a technician log into the mobile app for the first time while in the middle of a desert job site with no cell reception?"**
+   *Answer*: No. The first-ever login requires internet connectivity. Password verification (bcrypt hashing) and cryptographic JWT signing occur exclusively on the server. Technicians log in at the yard office before heading into dead zones; once logged in, their session and operational snapshot remain valid offline.
+2. **"How does DevTools offline mode help verify our sync logic?"**
+   *Answer*: By switching the Network tab to 'Offline', the browser cuts all outbound HTTP requests. You can perform equipment moves and material issues in the app, observe that they are saved in local IndexedDB outbox queues without crashing, and then switch back to 'No throttling' to watch the app immediately flush the batch to `/api/sync` and receive per-event receipts.
+3. **"What happens if an offline technician resends a batch three times because the connection was shaky?"**
+   *Answer*: The server detects the unique `client_event_id` UUID on each event. The first request accepts the moves; the second and third requests return status `duplicate` with the exact same stored result and write zero additional rows to the database.
+
+### How to verify:
+1. Run the complete automated offline test suite:
+   ```bash
+   npm --workspace=backend run test -- src/__tests__/offline_events.test.ts
+   ```
+   *Expected Result*: All 24 tests pass cleanly.
+2. Run all project test suites:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 7 test suites pass cleanly (**79 tests passed**).
+3. Verify TypeScript type checking:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: `tsc --noEmit` exits with 0 errors.
+4. Follow the manual DevTools demo procedure in `docs/DEMO.md`.

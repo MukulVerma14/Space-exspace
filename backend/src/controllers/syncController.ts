@@ -577,7 +577,7 @@ async function handleEquipmentRepair(
   occurredAt: string | Date
 ): Promise<Record<string, unknown>> {
   const assetCode = payload.asset_code?.toString().trim();
-  const kind = payload.kind ? String(payload.kind) : 'breakdown';
+  const kind = payload.kind === 'modification' ? 'modification' : 'repair';
   const description = payload.description ? String(payload.description) : 'Offline repair request';
   const workshopLocationId = payload.workshop_location_id ? Number(payload.workshop_location_id) : undefined;
   const note = payload.note ? String(payload.note) : null;
