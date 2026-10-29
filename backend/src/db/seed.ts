@@ -526,6 +526,7 @@ export async function seedDatabase() {
     }
 
     // =========================================================================
+    await client.query("DELETE FROM maintenance WHERE closed_at IS NULL AND equipment_id NOT IN ($1, $2)", [equipIdMap.get('CRN-50-004')!, equipIdMap.get('CRN-70-003')!]);
     // 9. MAINTENANCE (REPAIRS: OPEN WORK ORDERS & CLOSED HISTORICAL WORK)
     // =========================================================================
     // Open maintenance order 1: CRN-50-004 (Hydraulic pump overhaul) -> derives status 'under_repair'

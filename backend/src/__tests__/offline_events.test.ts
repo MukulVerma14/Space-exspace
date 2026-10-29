@@ -1,4 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import request from 'supertest';
+import { app } from '../app.js';
+import { seedDatabase } from '../db/seed.js';
+import crypto from 'crypto';
 import { pool } from '../db/pool.js';
 import { findSyncEventById, persistSyncEvent } from '../services/syncEventService.js';
 
@@ -163,11 +167,6 @@ describe('Step O1: Offline Idempotent Events & Occurred-Time Ordering', () => {
   });
 
   it('prevents stale devices from overwriting newer moves by ordering v_equipment_current by occurred_at (moved_at DESC)', async () => {
-    // Scenario:
-    // Event 1: Online worker moved the crane to Location 2 at 10:00 AM (server recorded it at 10:01 AM)
-    // Event 2: Offline worker moved the crane to Location 3 at 08:00 AM (device was offline, synced at 11:00 AM)
-    // Expected result: v_equipment_current MUST show Location 2 as the current location, NOT Location 3!
-
     const time10AM = new Date('2026-10-28T10:00:00.000Z');
     const time08AM = new Date('2026-10-28T08:00:00.000Z');
 
@@ -193,11 +192,396 @@ describe('Step O1: Offline Idempotent Events & Occurred-Time Ordering', () => {
     );
 
     // Crucial check: v_equipment_current MUST STILL return Location 2!
-    // The older move (08:00 AM) must NOT overwrite the newer move (10:00 AM), even though it arrived later!
     viewRes = await pool.query(
       `SELECT current_location_id FROM v_equipment_current WHERE id = $1`,
       [testEquipmentId]
     );
     expect(viewRes.rows[0].current_location_id).toBe(testLocation2Id);
+  });
+});
+
+describe('Step O2: Offline Batch Replay Suite (POST /api/sync)', () => {
+  let adminToken: string;
+  let staffToken: string;
+  let adminUser: { id: number; email: string; role: string };
+  let staffUser: { id: number; email: string; role: string };
+
+  let testYardId: number;
+  let testWorkshopId: number;
+  let testMaterialId: number;
+  const testAssetCode = 'TEST-SYNC-O2-01';
+  let testEquipmentId: number;
+
+  beforeAll(async () => {
+    // Reset seed to ensure predictable canonical state
+    await seedDatabase();
+
+    // Log in admin
+    const adminRes = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'admin@spaceexspace.com', password: 'Admin#2026!Dev' });
+    adminToken = adminRes.body.token;
+    adminUser = adminRes.body.user;
+
+    // Log in staff
+    const staffRes = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'staff@spaceexspace.com', password: 'Staff#2026!Dev' });
+    staffToken = staffRes.body.token;
+    staffUser = staffRes.body.user;
+
+    // Fetch helper entity IDs
+    const yardRes = await pool.query(`SELECT id FROM locations WHERE kind = 'yard' LIMIT 1`);
+    testYardId = yardRes.rows[0].id;
+
+    const workshopRes = await pool.query(`SELECT id FROM locations WHERE kind = 'workshop' LIMIT 1`);
+    testWorkshopId = workshopRes.rows[0].id;
+
+    const matRes = await pool.query(`SELECT id FROM items WHERE active = true LIMIT 1`);
+    testMaterialId = matRes.rows[0].id;
+
+    // Create an isolated equipment asset for Step O2 tests
+    await pool.query(`DELETE FROM location_log WHERE equipment_id IN (SELECT id FROM equipment WHERE asset_code = $1)`, [testAssetCode]);
+    await pool.query(`DELETE FROM equipment WHERE asset_code = $1`, [testAssetCode]);
+    const mRes = await pool.query(`SELECT id FROM equipment_models LIMIT 1`);
+    const eqRes = await pool.query(
+      `INSERT INTO equipment (asset_code, model_id, condition) VALUES ($1, $2, 'good') RETURNING id`,
+      [testAssetCode, mRes.rows[0].id]
+    );
+    testEquipmentId = eqRes.rows[0].id;
+
+    // Record an initial location older than any test events (2 hours ago)
+    await pool.query(
+      `INSERT INTO location_log (equipment_id, location_id, moved_by, moved_at, recorded_at, note)
+       VALUES ($1, $2, $3, NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours', 'Initial O2 test location')`,
+      [testEquipmentId, testYardId, staffUser.id]
+    );
+  });
+
+  afterAll(async () => {
+    await pool.query(`DELETE FROM sync_events WHERE user_id = $1`, [staffUser.id]);
+    await pool.query(`DELETE FROM location_log WHERE equipment_id = $1`, [testEquipmentId]);
+    await pool.query(`DELETE FROM equipment WHERE id = $1`, [testEquipmentId]);
+    await seedDatabase();
+  });
+
+  it('rejects unauthenticated requests with 401', async () => {
+    const res = await request(app)
+      .post('/api/sync')
+      .send({ events: [] });
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects batch size exceeding 50 events with 400', async () => {
+    const oversizedEvents = Array.from({ length: 51 }, () => ({
+      client_event_id: crypto.randomUUID(),
+      user_id: staffUser.id,
+      type: 'equipment.move',
+      payload: { asset_code: testAssetCode, location_id: testYardId },
+      occurred_at: new Date().toISOString(),
+    }));
+
+    const res = await request(app)
+      .post('/api/sync')
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ events: oversizedEvents });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('BATCH_SIZE_EXCEEDED');
+  });
+
+  it('replays batch of out-of-order events in occurred_at order and derives latest location', async () => {
+    const t1 = new Date(Date.now() - 3600000).toISOString(); // 1 hour ago
+    const t2 = new Date(Date.now() - 1800000).toISOString(); // 30 mins ago (latest)
+    const tReceipt = new Date(Date.now() - 2700000).toISOString(); // 45 mins ago
+
+    const event1Id = crypto.randomUUID();
+    const event2Id = crypto.randomUUID();
+    const eventReceiptId = crypto.randomUUID();
+
+    // Send intentionally in non-chronological order: [Event 2 (latest), Event Receipt, Event 1 (earliest)]
+    const batch = [
+      {
+        client_event_id: event2Id,
+        user_id: staffUser.id,
+        type: 'equipment.move',
+        payload: { asset_code: testAssetCode, location_id: testWorkshopId, note: 'Relocated to workshop' },
+        occurred_at: t2,
+      },
+      {
+        client_event_id: eventReceiptId,
+        user_id: staffUser.id,
+        type: 'material.goods_received',
+        payload: { item_id: testMaterialId, qty: 15, note: 'Received extra materials' },
+        occurred_at: tReceipt,
+      },
+      {
+        client_event_id: event1Id,
+        user_id: staffUser.id,
+        type: 'equipment.move',
+        payload: { asset_code: testAssetCode, location_id: testYardId, note: 'Relocated to yard' },
+        occurred_at: t1,
+      },
+    ];
+
+    const res = await request(app)
+      .post('/api/sync')
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ events: batch });
+
+    expect(res.status).toBe(200);
+    expect(res.body.processed).toBe(3);
+
+    const r1 = res.body.results.find((r: any) => r.client_event_id === event1Id);
+    const r2 = res.body.results.find((r: any) => r.client_event_id === event2Id);
+    const rReceipt = res.body.results.find((r: any) => r.client_event_id === eventReceiptId);
+
+    expect(r1.status).toBe('accepted');
+    expect(r2.status).toBe('accepted');
+    expect(rReceipt.status).toBe('accepted');
+    expect(rReceipt.result.delta_qty).toBe(15);
+
+    // Verify v_equipment_current reflects Event 2 (workshop) because t2 > t1
+    const viewRes = await pool.query(
+      `SELECT current_location_id FROM v_equipment_current WHERE asset_code = $1`,
+      [testAssetCode]
+    );
+    expect(viewRes.rows[0].current_location_id).toBe(testWorkshopId);
+  });
+
+  it('ensures idempotent replay: resending the batch returns duplicate status with stored result', async () => {
+    const eventId = crypto.randomUUID();
+    const event = {
+      client_event_id: eventId,
+      user_id: staffUser.id,
+      type: 'equipment.move',
+      payload: { asset_code: testAssetCode, location_id: testYardId },
+      occurred_at: new Date(Date.now() - 60000).toISOString(),
+    };
+
+    // First attempt: Accepted
+    const res1 = await request(app)
+      .post('/api/sync')
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ events: [event] });
+
+    expect(res1.status).toBe(200);
+    expect(res1.body.results[0].status).toBe('accepted');
+
+    // Count location_log entries before retry
+    const countBefore = await pool.query(
+      `SELECT count(*) FROM location_log WHERE equipment_id = $1`,
+      [testEquipmentId]
+    );
+
+    // Second attempt: Duplicate
+    const res2 = await request(app)
+      .post('/api/sync')
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ events: [event] });
+
+    expect(res2.status).toBe(200);
+    expect(res2.body.results[0].status).toBe('duplicate');
+    expect(res2.body.results[0].result).toBeDefined();
+
+    // Verify no duplicate location_log record was inserted
+    const countAfter = await pool.query(
+      `SELECT count(*) FROM location_log WHERE equipment_id = $1`,
+      [testEquipmentId]
+    );
+    expect(countAfter.rows[0].count).toBe(countBefore.rows[0].count);
+  });
+
+  it('rejects events with user_id mismatch and persists rejection audit', async () => {
+    const eventId = crypto.randomUUID();
+    const event = {
+      client_event_id: eventId,
+      user_id: adminUser.id, // Mismatched: staff user sending admin's user_id
+      type: 'equipment.move',
+      payload: { asset_code: testAssetCode, location_id: testYardId },
+      occurred_at: new Date(Date.now() - 30000).toISOString(),
+    };
+
+    const res = await request(app)
+      .post('/api/sync')
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ events: [event] });
+
+    expect(res.status).toBe(200);
+    const item = res.body.results[0];
+    expect(item.client_event_id).toBe(eventId);
+    expect(item.status).toBe('rejected');
+    expect(item.error).toBe('USER_MISMATCH');
+
+    // Verify rejection is persisted in sync_events
+    const checkDb = await pool.query(`SELECT * FROM sync_events WHERE client_event_id = $1`, [eventId]);
+    expect(checkDb.rows.length).toBe(1);
+    expect(checkDb.rows[0].status).toBe('rejected');
+  });
+
+  it('rejects events with future clock skew (> 5 minutes) and persists rejection', async () => {
+    const eventId = crypto.randomUUID();
+    const futureTime = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 mins in future
+
+    const event = {
+      client_event_id: eventId,
+      user_id: staffUser.id,
+      type: 'equipment.move',
+      payload: { asset_code: testAssetCode, location_id: testYardId },
+      occurred_at: futureTime,
+    };
+
+    const res = await request(app)
+      .post('/api/sync')
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ events: [event] });
+
+    expect(res.status).toBe(200);
+    const item = res.body.results[0];
+    expect(item.status).toBe('rejected');
+    expect(item.error).toBe('CLOCK_SKEW_EXCEEDED');
+
+    // Verify rejection in DB
+    const checkDb = await pool.query(`SELECT * FROM sync_events WHERE client_event_id = $1`, [eventId]);
+    expect(checkDb.rows.length).toBe(1);
+    expect(checkDb.rows[0].status).toBe('rejected');
+  });
+
+  it('re-checks preconditions: cannot return equipment that is not actively rented', async () => {
+    const eventId = crypto.randomUUID();
+
+    const event = {
+      client_event_id: eventId,
+      user_id: staffUser.id,
+      type: 'equipment.return',
+      payload: { asset_code: testAssetCode, location_id: testYardId },
+      occurred_at: new Date(Date.now() - 10000).toISOString(),
+    };
+
+    const res = await request(app)
+      .post('/api/sync')
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ events: [event] });
+
+    expect(res.status).toBe(200);
+    const item = res.body.results[0];
+    expect(item.status).toBe('rejected');
+    expect(item.error).toBe('NOT_RENTED');
+
+    // Verify rejection in DB
+    const checkDb = await pool.query(`SELECT * FROM sync_events WHERE client_event_id = $1`, [eventId]);
+    expect(checkDb.rows.length).toBe(1);
+    expect(checkDb.rows[0].status).toBe('rejected');
+  });
+
+  it('re-checks preconditions: cannot issue stock below zero', async () => {
+    const eventId = crypto.randomUUID();
+    const event = {
+      client_event_id: eventId,
+      user_id: staffUser.id,
+      type: 'material.issue',
+      payload: { item_id: testMaterialId, qty: 999999 }, // Vastly exceeds available stock
+      occurred_at: new Date(Date.now() - 10000).toISOString(),
+    };
+
+    const res = await request(app)
+      .post('/api/sync')
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ events: [event] });
+
+    expect(res.status).toBe(200);
+    const item = res.body.results[0];
+    expect(item.status).toBe('rejected');
+    expect(item.error).toBe('INSUFFICIENT_STOCK');
+
+    // Verify rejection in DB
+    const checkDb = await pool.query(`SELECT * FROM sync_events WHERE client_event_id = $1`, [eventId]);
+    expect(checkDb.rows.length).toBe(1);
+    expect(checkDb.rows[0].status).toBe('rejected');
+  });
+
+  it('ensures staff responses contain zero financial rates, prices, or costs', async () => {
+    const assetCode = 'CRN-50-001'; // Actively rented crane (has applied_rate in rental)
+    const eventId = crypto.randomUUID();
+
+    // Staff performs a move on this machine
+    const event = {
+      client_event_id: eventId,
+      user_id: staffUser.id,
+      type: 'equipment.move',
+      payload: { asset_code: assetCode, location_id: testYardId },
+      occurred_at: new Date(Date.now() - 5000).toISOString(),
+    };
+
+    const res = await request(app)
+      .post('/api/sync')
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ events: [event] });
+
+    expect(res.status).toBe(200);
+    const item = res.body.results[0];
+    expect(item.status).toBe('accepted');
+
+    // Serialize whole response to string and verify forbidden financial keywords are absent
+    const responseJson = JSON.stringify(res.body);
+    expect(responseJson).not.toContain('applied_rate');
+    expect(responseJson).not.toContain('unit_cost');
+    expect(responseJson).not.toContain('unit_price');
+    expect(responseJson).not.toContain('discount_note');
+  });
+
+  it('processes a mixed batch where some succeed and some fail without dropping any event', async () => {
+    const validMoveId = crypto.randomUUID();
+    const invalidReturnId = crypto.randomUUID();
+    const clockSkewId = crypto.randomUUID();
+
+    const batch = [
+      {
+        client_event_id: validMoveId,
+        user_id: staffUser.id,
+        type: 'equipment.move',
+        payload: { asset_code: testAssetCode, location_id: testYardId },
+        occurred_at: new Date(Date.now() - 100000).toISOString(),
+      },
+      {
+        client_event_id: invalidReturnId,
+        user_id: staffUser.id,
+        type: 'equipment.return',
+        payload: { asset_code: testAssetCode, location_id: testYardId }, // Not rented
+        occurred_at: new Date(Date.now() - 90000).toISOString(),
+      },
+      {
+        client_event_id: clockSkewId,
+        user_id: staffUser.id,
+        type: 'equipment.move',
+        payload: { asset_code: testAssetCode, location_id: testYardId },
+        occurred_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(), // > 5 mins
+      },
+    ];
+
+    const res = await request(app)
+      .post('/api/sync')
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({ events: batch });
+
+    expect(res.status).toBe(200);
+    expect(res.body.processed).toBe(3);
+
+    const rValid = res.body.results.find((r: any) => r.client_event_id === validMoveId);
+    const rInvalid = res.body.results.find((r: any) => r.client_event_id === invalidReturnId);
+    const rClock = res.body.results.find((r: any) => r.client_event_id === clockSkewId);
+
+    expect(rValid.status).toBe('accepted');
+    expect(rInvalid.status).toBe('rejected');
+    expect(rInvalid.error).toBe('NOT_RENTED');
+    expect(rClock.status).toBe('rejected');
+    expect(rClock.error).toBe('CLOCK_SKEW_EXCEEDED');
+
+    // Verify all 3 are stored in sync_events
+    const countRes = await pool.query(
+      `SELECT count(*) FROM sync_events WHERE client_event_id IN ($1, $2, $3)`,
+      [validMoveId, invalidReturnId, clockSkewId]
+    );
+    expect(countRes.rows[0].count).toBe('3');
   });
 });

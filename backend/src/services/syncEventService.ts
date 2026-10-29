@@ -16,7 +16,7 @@ export interface SaveSyncEventParams {
   user_id: number;
   type: string;
   payload: Record<string, unknown>;
-  status: 'accepted' | 'rejected';
+  status: 'accepted' | 'rejected' | 'duplicate';
   result: Record<string, unknown> | null;
   occurred_at: string | Date;
 }

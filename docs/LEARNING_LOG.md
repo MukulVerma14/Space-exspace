@@ -652,3 +652,87 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    npm --workspace=backend run lint
    ```
    *Expected Result*: `tsc --noEmit` exits with 0 errors.
+
+
+---
+
+## Step O2: Batch Sync Endpoint, Precondition Guards, and Conflict Policy
+
+### What we built:
+- **Batch Sync Controller & Routes (`backend/src/controllers/syncController.ts`, `backend/src/routes/syncRoutes.ts`)**:
+  - `POST /api/sync`: Accepts a batch of up to 50 offline events.
+  - Sorts events strictly by physical timestamp (`occurred_at ASC`) before processing.
+  - Processes each event inside an isolated database transaction (`BEGIN ... COMMIT / ROLLBACK`), ensuring that a failure in one event never rolls back other valid events.
+  - Evaluates domain preconditions at sync time:
+    - `equipment.move`: Validates asset and destination location exist; records move with `moved_at = occurred_at`.
+    - `equipment.return`: Verifies the machine is actively rented; updates `rental_items.returned_at = occurred_at`, updates condition, records return location, and updates rental status.
+    - `equipment.repair`: Checks that machine is not currently rented and not already under repair; creates `maintenance` record and workshop relocation.
+    - `material.goods_received`: Replays quantity-only receipt into the single-entry append-only ledger with zero unit cost.
+    - `material.issue`: Re-checks that stock on hand will not drop below zero before inserting negative delta.
+  - Enforces authorization invariants: Event `user_id` must equal authenticated token `req.user.id` (rejects with `USER_MISMATCH`).
+  - Enforces clock skew limit: Rejects any event with `occurred_at > NOW() + 5 minutes` (rejects with `CLOCK_SKEW_EXCEEDED`).
+  - Idempotency check: If `client_event_id` was already processed, returns cached status `duplicate` with original result payload.
+  - Non-dropping audit contract: Rejections are immediately persisted in `sync_events` with `status = 'rejected'` and descriptive error metadata.
+  - Data protection: Passes all batch responses through `sanitizeFinancials(results, userRole)` so staff never receive commercial rates or costs.
+- **Architectural Decision Record**: Documented in `docs/decisions/009-offline-conflict-policy.md`.
+- **Automated Verification Suite (`backend/src/__tests__/offline_events.test.ts`)**: 10 comprehensive integration tests verifying unauthenticated 401, batch limits (>50 rejected), out-of-order replay, idempotent duplicate resends, user token mismatch rejection, clock skew rejection, unrented return rejection, negative stock rejection, staff rate stripping, and mixed success/failure batches.
+
+### Why it exists:
+- **Client Requirement**: Mobile access for yard staff to scan a QR code and update location/status, functioning even in remote yards or basement workshops with intermittent or zero cellular connectivity (**CONFIRMED**).
+- **Client Requirement**: Two distinct roles (admin and staff) where staff scan QR codes and update status by physical action, without access to rates or prices (**CONFIRMED**).
+- **Core Distributed Reliability**: Mobile devices can collect dozens of actions across an 8-hour shift. When re-connected, the server must process the batch deterministically, preserve audit history, and prevent invalid business transitions.
+
+### Why this way:
+- **Per-Event Isolated Transactions instead of Single Batch Transaction**:
+  - *Alternative 1 Rejected (All-or-Nothing Batch Transaction)*: If a worker performs 25 equipment relocations and 1 invalid return, aborting all 25 valid relocations forces workers to re-scan equipment across the entire yard. Isolated per-event transactions maximize operational resilience in the field.
+- **Precondition Verification at Sync Time instead of Blind Upsert**:
+  - *Alternative 2 Rejected (Blindly Overwriting State)*: If another user already returned an item or issued all remaining cable while a device was offline, blindly applying the offline action would violate database constraints or corrupt inventory ledgers into negative numbers.
+- **Explicit Rejection Audit instead of Silent Dropping**:
+  - *Alternative 3 Rejected (Silent Drop / Ignore)*: If an event is rejected silently, workers have no visibility into why their screen doesn't match the physical yard. Persisting the rejection in `sync_events` guarantees full auditability for administrators.
+
+### How it works:
+1. Mobile device sends `POST /api/sync` with `{ events: [...] }` and Bearer JWT token.
+2. The endpoint verifies authentication, checks that `events.length <= 50`, and validates individual schemas.
+3. The server sorts events by `occurred_at ASC`.
+4. For each event:
+   - Validates that `event.user_id === req.user.id` and `occurred_at <= NOW() + 5m`.
+   - Starts transaction `BEGIN`.
+   - Queries `sync_events` for existing `client_event_id`. If found, rolls back and marks as `duplicate`.
+   - Validates business preconditions (active rental check, non-negative stock check).
+   - Executes the domain action (writing `location_log` or `stock_movements` with `moved_at = occurred_at`).
+   - Persists the success record into `sync_events` and commits `COMMIT`.
+   - If an error occurs, rolls back `ROLLBACK`, persists the rejection audit row into `sync_events`, and records `status: 'rejected'`.
+5. The endpoint sanitizes financial fields for staff users and returns HTTP 200 with per-event receipts.
+
+### Concepts used:
+- **Event Sourcing / CQRS Inspiration**: Treating offline actions as a stream of immutable historical domain events applied in business occurrence order.
+- **Fail-Partial Architecture**: Allowing valid batch operations to succeed while cleanly capturing and reporting individual failures.
+- **Clock Skew Tolerance**: Accepting reasonable device clock drift (up to 5 minutes into the future) while rejecting egregiously erroneous timestamps.
+- **Server-Side Sanitization**: Stripping confidential commercial rates before sending responses to staff clients.
+
+### Risks and assumptions:
+- **Assumption**: Network connection is restored at least once per work shift to prevent unbounded event backlogs.
+- **Risk**: If two staff members attempt to issue the last remaining drum of hydraulic oil while both are offline, the first one to sync will succeed; the second will be rejected with `INSUFFICIENT_STOCK`. The field team must perform physical stock reconciliation for rejected movements.
+
+### 30-second explanation:
+> *"We built the batch sync endpoint that receives up to 50 offline worker actions at once. The server sorts them so they execute in the exact order they happened in the yard, each inside its own safety box. If an action fails—like trying to return equipment that was already returned or issuing material that ran out—the server doesn't crash or throw away the rest of the worker's shift. It executes every valid move, records why the invalid one failed, and never reveals confidential commercial prices to staff."*
+
+### Likely questions:
+1. **"What happens if two yard workers move the same crane to different yards while both are offline?"**
+   *Answer*: Both movements are saved permanently in `location_log` as an audit trail. However, `v_equipment_current` orders movements strictly by `moved_at DESC` (when the action physically occurred). Whichever worker physically moved the crane later in real time will be reflected as the machine's current location once synced.
+2. **"Why does the server reject events with an `occurred_at` timestamp more than 5 minutes in the future?"**
+   *Answer*: Because `v_equipment_current` chooses the latest location based on `moved_at DESC`, a phone with a faulty clock set to the year 2030 would insert a record that permanently locks the crane's location for the next four years. The 5-minute future skew limit prevents clock drifts or tampering from poisoning the derived view.
+3. **"Why does `POST /api/sync` run each event in its own transaction instead of wrapping all 50 events in one big transaction?"**
+   *Answer*: If a technician scans 40 pieces of equipment during an 8-hour shift and makes a mistake on the 41st, wrapping the entire batch in one transaction would roll back all 40 successful scans. Isolated per-event transactions guarantee that valid physical work is never discarded due to an isolated precondition error.
+
+### How to verify:
+1. Run all backend test suites:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 7 test suites pass cleanly (**69 tests passed**, including all 14 tests in `offline_events.test.ts`).
+2. Run TypeScript compiler checks:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: `tsc --noEmit` exits with 0 errors.
