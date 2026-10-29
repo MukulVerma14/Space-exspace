@@ -7,7 +7,7 @@ const stockMovementSchema = z.object({
   item_id: z.number().int().positive('Item ID must be a positive integer'),
   type: z.enum(['receipt', 'issue', 'adjustment', 'return']),
   qty: z.number().refine(val => val !== 0, 'Quantity cannot be zero'),
-  unit_cost: z.number().nonnegative('Unit cost must be non-negative').optional(),
+  unit_cost: z.number().nonnegative('Unit cost must be non-negative').nullable().optional(),
   maintenance_id: z.number().int().positive().optional(),
   note: z.string().optional()
 });
@@ -195,8 +195,8 @@ export async function recordStockMovement(req: Request, res: Response): Promise<
     signedQty = qty;
   }
 
-  // Non-admins cannot record arbitrary unit_costs
-  const finalUnitCost = req.user?.role === 'admin' && unit_cost !== undefined ? unit_cost : 0.00;
+  // Non-admins cannot record arbitrary unit_costs; unpriced movements are stored as NULL
+  const finalUnitCost = req.user?.role === 'admin' && unit_cost !== undefined ? unit_cost : null;
 
   try {
     const insertRes = await pool.query<{ id: string; moved_at: Date }>(
@@ -236,6 +236,7 @@ export async function recordStockMovement(req: Request, res: Response): Promise<
 /**
  * Get historical supplier purchase prices for an item.
  * Admin only! Fulfills client requirement: "Invoices stored, and material prices tracked over time".
+ * Excludes movements and invoice lines with NULL costs from price history and inventory valuation.
  */
 export async function getMaterialPriceHistory(req: Request, res: Response): Promise<void> {
   const itemId = parseInt(req.params.id, 10);
@@ -262,14 +263,36 @@ export async function getMaterialPriceHistory(req: Request, res: Response): Prom
     JOIN invoices inv ON inv.id = il.invoice_id
     JOIN parties p ON p.id = inv.party_id
     JOIN units u ON u.id = il.unit_id
-    WHERE il.item_id = $1 AND inv.direction = 'received'
+    WHERE il.item_id = $1 AND inv.direction = 'received' AND il.unit_price IS NOT NULL
     ORDER BY inv.invoice_date DESC, inv.id DESC, il.line_no ASC
   `;
 
-  const result = await pool.query(query, [itemId]);
+  // Valuation summary strictly excluding NULL unit_cost movements (e.g. offline receipts pending supplier invoices)
+  const valuationQuery = `
+    SELECT
+      COUNT(*)::int AS priced_receipts_count,
+      COALESCE(SUM(qty), 0)::numeric(12,3) AS priced_qty,
+      COALESCE(SUM(qty * unit_cost), 0)::numeric(12,2) AS total_valuation,
+      COALESCE(SUM(qty * unit_cost) / NULLIF(SUM(qty), 0), 0)::numeric(12,2) AS average_cost
+    FROM stock_movements
+    WHERE item_id = $1 AND unit_cost IS NOT NULL AND qty > 0
+  `;
+
+  const [result, valuationRes] = await Promise.all([
+    pool.query(query, [itemId]),
+    pool.query(valuationQuery, [itemId])
+  ]);
+
+  const valuation = valuationRes.rows[0];
 
   res.json({
     item_id: itemId,
-    price_history: result.rows
+    price_history: result.rows,
+    valuation: {
+      total_valuation: parseFloat(valuation.total_valuation),
+      average_cost: parseFloat(valuation.average_cost),
+      priced_qty: parseFloat(valuation.priced_qty),
+      priced_receipts_count: valuation.priced_receipts_count
+    }
   });
 }

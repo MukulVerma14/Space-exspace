@@ -1,6 +1,6 @@
 # SPACE EXSPACE API Reference
 
-This document provides a comprehensive specification of every REST API endpoint implemented in the system to date (Steps 0–5).
+This document provides a comprehensive specification of every REST API endpoint implemented in the system, covering Core Fleet Operations, Commercial Billing, Materials Ledger, and Offline Resilient Sync (Steps 0–5 and Offline Sync O1–O4).
 
 ---
 
@@ -13,10 +13,10 @@ This document provides a comprehensive specification of every REST API endpoint 
 - **Quantities & Precision**: Consumable material inventory quantities use 3 decimal places (`numeric(12,3)`), accommodating partial units (e.g. 12.500 meters, 2.750 kg).
 - **Timestamps**: All timestamps are formatted as ISO 8601 strings in UTC (`timestamptz`).
 - **Server-Side Security & Rate Serialization**:
-  - Staff accounts (`role: 'staff'`) are restricted to operational tasks (QR scanning, status/location updates, material issues).
+  - Staff accounts (`role: 'staff'`) are restricted to operational tasks (QR scanning, status/location updates, material issues, offline receipts).
   - Commercial terms, rate cards, agreed contract rates, and supplier purchase costs are confidential.
   - Rather than relying on client UI hiding, the server's `sanitizeFinancials()` serializer physically omits the following sensitive keys from responses sent to staff:
-    `applied_rate`, `rates`, `rate_card`, `rate_cards`, `amount`, `unit_price`, `unit_cost`, `subtotal`, `vat_amount`, `total`, `discount_note`, `cost`.
+    `applied_rate`, `rates`, `rate_card`, `rate_cards`, `amount`, `unit_price`, `unit_cost`, `subtotal`, `vat_amount`, `total`, `discount_note`, `cost`, `standard_rates`.
 
 ---
 
@@ -43,10 +43,12 @@ This document provides a comprehensive specification of every REST API endpoint 
 | `GET` | [`/api/materials/:id`](#17-get-apimaterialsid) | Authenticated (`admin`, `staff`) | Get material SKU details with stock on hand |
 | `GET` | [`/api/materials/:id/movements`](#18-get-apimaterialsidmovements) | Authenticated (`admin`, `staff`) | Chronological stock ledger movements (staff unit costs scrubbed) |
 | `POST` | [`/api/materials/movements`](#19-post-apimaterialsmovements) | Authenticated (`admin`, `staff`) | Record stock receipt, issue, or adjustment (negative stock rejected) |
-| `GET` | [`/api/materials/:id/price-history`](#20-get-apimaterialsidprice-history) | Admin Only (`role: 'admin'`) | Material purchase price fluctuations over time from supplier invoices |
+| `GET` | [`/api/materials/:id/price-history`](#20-get-apimaterialsidprice-history) | Admin Only (`role: 'admin'`) | Material purchase price fluctuations and valuation (excludes NULL costs) |
 | `GET` | [`/api/invoices`](#21-get-apiinvoices) | Admin Only (`role: 'admin'`) | List stored supplier and customer invoices |
 | `GET` | [`/api/invoices/:id`](#22-get-apiinvoicesid) | Admin Only (`role: 'admin'`) | Get invoice details with line items |
 | `POST` | [`/api/invoices/supplier`](#23-post-apiinvoicessupplier) | Admin Only (`role: 'admin'`) | Record received supplier invoice & auto-update material price history |
+| `GET` | [`/api/sync/snapshot`](#24-get-apisyncsnapshot) | Authenticated (`admin`, `staff`) | Fetch offline read snapshot (ETag conditional caching, role-filtered) |
+| `POST` | [`/api/sync`](#25-post-apisync) | Authenticated (`admin`, `staff`) | Replay offline event batches (idempotent UUIDs, row-locked trigger guards) |
 
 ---
 
@@ -101,8 +103,7 @@ Authenticates credentials using bcrypt password verification against `users.pass
 - **Method**: `POST`
 - **Path**: `/api/auth/login`
 - **Auth Required**: None (Public)
-- **Request Headers**:
-  - `Content-Type: application/json`
+- **Request Headers**: `Content-Type: application/json`
 - **Request Body**:
 ```json
 {
@@ -113,10 +114,9 @@ Authenticates credentials using bcrypt password verification against `users.pass
 
 #### Responses
 
-##### Admin Login Response (200 OK)
+##### Response (200 OK)
 ```json
 {
-  "message": "Login successful",
   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
   "user": {
     "id": 1,
@@ -127,11 +127,34 @@ Authenticates credentials using bcrypt password verification against `users.pass
 }
 ```
 
-##### Staff Login Response (200 OK)
+##### Error Response (401 Unauthorized — Invalid Credentials)
 ```json
 {
-  "message": "Login successful",
-  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "error": "Invalid email or password"
+}
+```
+
+##### Error Response (429 Too Many Requests — Rate Limit Exceeded)
+```json
+{
+  "error": "Too many login attempts from this IP. Please try again after 15 minutes."
+}
+```
+
+---
+
+### 3. `GET /api/auth/me`
+
+Retrieves the currently authenticated user's profile and active session role.
+
+- **Method**: `GET`
+- **Path**: `/api/auth/me`
+- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
+- **Request Headers**: `Authorization: Bearer <jwt_token>`
+
+#### Response (200 OK)
+```json
+{
   "user": {
     "id": 2,
     "name": "Tariq Mansour (Yard Lead)",
@@ -143,135 +166,50 @@ Authenticates credentials using bcrypt password verification against `users.pass
 
 ---
 
-### 3. `GET /api/auth/me`
-
-Retrieves current session claims and profile.
-
-- **Method**: `GET`
-- **Path**: `/api/auth/me`
-- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
-
----
-
 ### 4. `GET /api/rates`
 
-Retrieves master standard commercial rate cards. **Admin only.**
+Lists all standard commercial equipment rental rate cards. **Admin only.**
 
 - **Method**: `GET`
 - **Path**: `/api/rates`
 - **Auth Required**: `Bearer <token>` (`role: 'admin'`)
-
----
-
-### 5. `GET /api/rates/rental-quote-demo`
-
-Demonstration endpoint illustrating server-side rate serialization.
-
-- **Method**: `GET`
-- **Path**: `/api/rates/rental-quote-demo`
-- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
-
----
-
-### 6. `GET /api/equipment`
-
-Queries the entire fleet reading directly from dynamic derived view `v_equipment_current`.
-
-- **Method**: `GET`
-- **Path**: `/api/equipment`
-- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
-- **Query Parameters**: `search`, `status`, `type_id`, `location_id`, `condition`, `page`, `limit`
-
----
-
-### 7. `GET /api/equipment/:asset_code`
-
-The core **QR scan endpoint** resolving natural key `asset_code` to specifications, location history, active rental details, and maintenance.
-
-- **Method**: `GET`
-- **Path**: `/api/equipment/:asset_code`
-- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
-
----
-
-### 8. `POST /api/equipment/:asset_code/move`
-
-Domain action to record the physical relocation of an asset.
-
-- **Method**: `POST`
-- **Path**: `/api/equipment/:asset_code/move`
-- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
-
----
-
-### 9. `POST /api/equipment/:asset_code/return`
-
-Domain action to check an equipment unit back into a yard upon completion of a rental.
-
-- **Method**: `POST`
-- **Path**: `/api/equipment/:asset_code/return`
-- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
-
----
-
-### 10. `POST /api/equipment/:asset_code/repair`
-
-Domain action to send a damaged machine to a maintenance workshop.
-
-- **Method**: `POST`
-- **Path**: `/api/equipment/:asset_code/repair`
-- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
-
----
-
-### 11. `GET /api/rentals`
-
-Lists rental contracts with customer names, delivery sites, status, and item counts. Paginated.
-
-- **Method**: `GET`
-- **Path**: `/api/rentals`
-- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
-- **Query Parameters**:
-  - `status` (optional): `'quotation' | 'confirmed' | 'picked_up' | 'returned' | 'cancelled'`
-  - `customer_id` (optional integer): filter by customer
-  - `page` (optional integer, default `1`)
-  - `limit` (optional integer, default `20`)
+- **Query Parameters**: `model_id` (optional integer), `unit` (optional `'daily' | 'weekly' | 'monthly'`)
 
 #### Response (200 OK)
 ```json
 {
   "data": [
     {
-      "id": 1,
-      "customer_id": 4,
-      "customer_name": "Apex Infrastructure Partners",
-      "site_id": 6,
-      "site_name": "King Salman Port Terminal Site",
-      "status": "picked_up",
-      "start_date": "2026-09-01",
-      "expected_end": "2026-12-31",
-      "created_at": "2026-10-28T07:15:00.000Z",
-      "total_items": 5,
-      "active_items": 5
+      "model_id": 1,
+      "make": "Tadano",
+      "model": "GR-500EX",
+      "type_name": "Rough Terrain Crane",
+      "unit": "monthly",
+      "amount": "35000.00",
+      "vat_included": false,
+      "valid_from": "2026-01-01T00:00:00.000Z"
     }
-  ],
-  "pagination": {
-    "page": 1,
-    "limit": 20,
-    "total": 3,
-    "total_pages": 1
-  }
+  ]
+}
+```
+
+#### Staff Response (403 Forbidden)
+```json
+{
+  "error": "Access forbidden: insufficient permissions",
+  "requiredRoles": ["admin"],
+  "currentRole": "staff"
 }
 ```
 
 ---
 
-### 12. `GET /api/rentals/:id`
+### 5. `GET /api/rates/rental-quote-demo`
 
-Retrieves full rental contract details with all assigned line items.
+Demonstrates server-side rate stripping on quotation previews.
 
 - **Method**: `GET`
-- **Path**: `/api/rentals/:id`
+- **Path**: `/api/rates/rental-quote-demo`
 - **Auth Required**: `Bearer <token>` (`admin` or `staff`)
 
 #### Responses Comparison (Admin vs Staff)
@@ -279,13 +217,257 @@ Retrieves full rental contract details with all assigned line items.
 ##### Admin Response (200 OK — Full Commercial Visibility)
 ```json
 {
+  "quote_id": 101,
+  "customer": "Saudi Aramco Offshore Projects",
+  "equipment_code": "CRN-50-001",
+  "daily_rate": 2500.00,
+  "discount_percentage": 10.0,
+  "final_agreed_rate": 2250.00,
+  "currency": "SAR"
+}
+```
+
+##### Staff Response (200 OK — Sanitized Operational Data)
+```json
+{
+  "quote_id": 101,
+  "customer": "Saudi Aramco Offshore Projects",
+  "equipment_code": "CRN-50-001",
+  "currency": "SAR"
+}
+```
+
+---
+
+### 6. `GET /api/equipment`
+
+Lists the entire fleet from `v_equipment_current`.
+
+- **Method**: `GET`
+- **Path**: `/api/equipment`
+- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
+- **Query Parameters**: `status` (`'available' | 'rented' | 'under_repair'`), `type_id`, `location_id`, `search`, `page`, `limit`
+
+#### Response (200 OK)
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "asset_code": "CRN-50-001",
+      "serial_no": "TD-500-9841",
+      "condition": "good",
+      "active": true,
+      "make": "Tadano",
+      "model": "GR-500EX",
+      "type_name": "Rough Terrain Crane",
+      "current_location_id": 3,
+      "current_location_name": "King Salman Port Terminal Site",
+      "status": "rented",
+      "current_rental_id": 1,
+      "current_customer_name": "Apex Infrastructure Partners"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "limit": 20,
+    "total": 24,
+    "total_pages": 2
+  }
+}
+```
+
+---
+
+### 7. `GET /api/equipment/:asset_code`
+
+Resolves a QR scan on a physical asset tag.
+
+- **Method**: `GET`
+- **Path**: `/api/equipment/:asset_code`
+- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
+
+#### Responses Comparison (Admin vs Staff)
+
+##### Admin Response (200 OK)
+```json
+{
+  "equipment": {
+    "id": 1,
+    "asset_code": "CRN-50-001",
+    "serial_no": "TD-500-9841",
+    "condition": "good",
+    "status": "rented",
+    "current_location_name": "King Salman Port Terminal Site",
+    "current_rental_id": 1,
+    "current_customer_name": "Apex Infrastructure Partners",
+    "applied_rate": "35000.00",
+    "rate_unit": "monthly"
+  },
+  "history": {
+    "location_history": [
+      {
+        "location_name": "King Salman Port Terminal Site",
+        "moved_by_name": "Tariq Mansour (Yard Lead)",
+        "moved_at": "2026-09-01T08:00:00.000Z",
+        "note": "Dispatched for Rental #1"
+      }
+    ],
+    "maintenance_history": []
+  }
+}
+```
+
+##### Staff Response (200 OK — Rates Sanitized)
+```json
+{
+  "equipment": {
+    "id": 1,
+    "asset_code": "CRN-50-001",
+    "serial_no": "TD-500-9841",
+    "condition": "good",
+    "status": "rented",
+    "current_location_name": "King Salman Port Terminal Site",
+    "current_rental_id": 1,
+    "current_customer_name": "Apex Infrastructure Partners"
+  },
+  "history": {
+    "location_history": [
+      {
+        "location_name": "King Salman Port Terminal Site",
+        "moved_by_name": "Tariq Mansour (Yard Lead)",
+        "moved_at": "2026-09-01T08:00:00.000Z",
+        "note": "Dispatched for Rental #1"
+      }
+    ],
+    "maintenance_history": []
+  }
+}
+```
+
+---
+
+### 8. `POST /api/equipment/:asset_code/move`
+
+Appends an immutable movement event to `location_log`.
+
+- **Method**: `POST`
+- **Path**: `/api/equipment/:asset_code/move`
+- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
+- **Request Body**:
+```json
+{
+  "location_id": 2,
+  "note": "Relocated to Jubail Industrial Yard"
+}
+```
+
+#### Response (201 Created)
+```json
+{
+  "message": "Equipment CRN-50-001 relocated successfully",
+  "log_id": 42,
+  "equipment": {
+    "asset_code": "CRN-50-001",
+    "status": "available",
+    "current_location_id": 2,
+    "current_location_name": "Jubail Industrial Yard"
+  }
+}
+```
+
+---
+
+### 9. `POST /api/equipment/:asset_code/return`
+
+Returns a single equipment item from an active rental. If all line items on the rental agreement are returned, the rental header status updates to `'returned'`.
+
+- **Method**: `POST`
+- **Path**: `/api/equipment/:asset_code/return`
+- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
+- **Request Body**:
+```json
+{
+  "location_id": 1,
+  "condition": "good",
+  "note": "Returned off-hire inspection completed"
+}
+```
+
+#### Response (200 OK)
+```json
+{
+  "message": "Equipment CRN-50-001 returned successfully from rental #1",
+  "rental_id": 1,
+  "equipment": {
+    "asset_code": "CRN-50-001",
+    "status": "available",
+    "current_location_name": "Dammam Central Yard"
+  }
+}
+```
+
+---
+
+### 10. `POST /api/equipment/:asset_code/repair`
+
+Sends equipment to workshop maintenance and transitions condition to `'needs_repair'`.
+
+- **Method**: `POST`
+- **Path**: `/api/equipment/:asset_code/repair`
+- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
+- **Request Body**:
+```json
+{
+  "kind": "repair",
+  "description": "Hydraulic cylinder seal leaking under load",
+  "cost": 1500.00,
+  "note": "Urgent turnaround requested"
+}
+```
+
+#### Response (201 Created)
+```json
+{
+  "message": "Maintenance work order opened and equipment relocated to workshop",
+  "maintenance_id": 7,
+  "equipment": {
+    "asset_code": "CRN-50-001",
+    "status": "under_repair",
+    "current_location_name": "Central Maintenance Workshop"
+  }
+}
+```
+
+---
+
+### 11. `GET /api/rentals`
+
+Lists rental contracts. Staff responses sanitize all rates (`applied_rate`).
+
+- **Method**: `GET`
+- **Path**: `/api/rentals`
+- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
+- **Query Parameters**: `status` (`'quotation' | 'confirmed' | 'picked_up' | 'returned' | 'cancelled'`), `customer_id`, `page`, `limit`
+
+---
+
+### 12. `GET /api/rentals/:id`
+
+Retrieves a single rental contract and its line items.
+
+- **Method**: `GET`
+- **Path**: `/api/rentals/:id`
+- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
+
+#### Responses Comparison (Admin vs Staff)
+
+##### Admin Response (200 OK — With Financial Rates)
+```json
+{
   "data": {
     "id": 1,
-    "customer_id": 4,
     "customer_name": "Apex Infrastructure Partners",
-    "customer_contact": "Eng. Faisal Al-Subaie",
-    "customer_phone": "+966 13 800 0004",
-    "site_id": 6,
     "site_name": "King Salman Port Terminal Site",
     "status": "picked_up",
     "start_date": "2026-09-01",
@@ -296,7 +478,6 @@ Retrieves full rental contract details with all assigned line items.
         "asset_code": "CRN-50-001",
         "make": "Tadano",
         "model": "GR-500EX",
-        "type_name": "Hydraulic Mobile Crane",
         "applied_rate": "35000.00",
         "rate_unit": "monthly",
         "discount_note": "Contract volume discount applied",
@@ -307,17 +488,12 @@ Retrieves full rental contract details with all assigned line items.
 }
 ```
 
-##### Staff Response (200 OK — Serialized & Stripped)
-`applied_rate` and `discount_note` are physically omitted:
+##### Staff Response (200 OK — Rates Scrubbed)
 ```json
 {
   "data": {
     "id": 1,
-    "customer_id": 4,
     "customer_name": "Apex Infrastructure Partners",
-    "customer_contact": "Eng. Faisal Al-Subaie",
-    "customer_phone": "+966 13 800 0004",
-    "site_id": 6,
     "site_name": "King Salman Port Terminal Site",
     "status": "picked_up",
     "start_date": "2026-09-01",
@@ -328,8 +504,6 @@ Retrieves full rental contract details with all assigned line items.
         "asset_code": "CRN-50-001",
         "make": "Tadano",
         "model": "GR-500EX",
-        "type_name": "Hydraulic Mobile Crane",
-        "rate_unit": "monthly",
         "returned_at": null
       }
     ]
@@ -341,8 +515,7 @@ Retrieves full rental contract details with all assigned line items.
 
 ### 13. `POST /api/rentals`
 
-Creates a new rental contract with agreed applied rates. **Admin only.**
-Atomically validates availability to prevent double-booking.
+Creates a new rental contract with agreed commercial rates. **Admin only.** Prevents double-booking via partial unique index `idx_uq_active_rental_per_equipment`.
 
 - **Method**: `POST`
 - **Path**: `/api/rentals`
@@ -350,17 +523,16 @@ Atomically validates availability to prevent double-booking.
 - **Request Body**:
 ```json
 {
-  "customer_id": 4,
-  "site_id": 5,
+  "customer_id": 1,
+  "site_id": 3,
   "start_date": "2026-11-01",
   "expected_end": "2026-11-30",
-  "status": "confirmed",
   "items": [
     {
-      "equipment_id": 12,
-      "applied_rate": 1850.00,
-      "rate_unit": "daily",
-      "discount_note": "Standard contractor day rate"
+      "equipment_id": 5,
+      "applied_rate": 28000.00,
+      "rate_unit": "monthly",
+      "discount_note": "Long-term client discount"
     }
   ]
 }
@@ -369,18 +541,17 @@ Atomically validates availability to prevent double-booking.
 #### Response (201 Created)
 ```json
 {
-  "message": "Rental agreement created successfully",
+  "message": "Rental agreement created successfully in 'confirmed' status",
   "rental_id": 4,
-  "status": "confirmed"
+  "item_count": 1
 }
 ```
 
-#### Error Response (409 Conflict — Double-booking prevented)
+#### Error Response (400 Bad Request — Double Booking)
 ```json
 {
-  "error": "Equipment 'CRN-50-001' is currently unavailable (Status: rented)",
-  "conflict_asset_code": "CRN-50-001",
-  "conflict_status": "rented"
+  "error": "Double-booking rejected: equipment 'CRN-50-001' already has an active or confirmed rental agreement",
+  "conflicting_equipment_id": 1
 }
 ```
 
@@ -388,32 +559,17 @@ Atomically validates availability to prevent double-booking.
 
 ### 14. `POST /api/rentals/:id/pickup`
 
-Dispatches rental agreement. Transitions status to `'picked_up'` and writes append-only entries to `location_log` transferring equipment to the client job site.
+Transitions rental to `'picked_up'` and dispatches all equipment items to client site.
 
 - **Method**: `POST`
 - **Path**: `/api/rentals/:id/pickup`
 - **Auth Required**: `Bearer <token>` (`admin` or `staff`)
-- **Request Body**:
-```json
-{
-  "note": "Mobilized with low-bed trailer"
-}
-```
-
-#### Response (200 OK)
-```json
-{
-  "message": "Rental agreement marked as picked up. Equipment locations updated to client site.",
-  "rental_id": 4,
-  "dispatched_items_count": 1
-}
-```
 
 ---
 
 ### 15. `POST /api/rentals/:id/return`
 
-Checks all rental items back into a yard location. Sets `returned_at = CURRENT_TIMESTAMP`, updates rental status to `'returned'`, and writes return logs to `location_log`.
+Closes an entire rental agreement, marks all items returned, and logs yard check-in.
 
 - **Method**: `POST`
 - **Path**: `/api/rentals/:id/return`
@@ -422,7 +578,7 @@ Checks all rental items back into a yard location. Sets `returned_at = CURRENT_T
 ```json
 {
   "location_id": 1,
-  "note": "Returned clean upon project completion"
+  "note": "Full rental agreement returned to Dammam Yard"
 }
 ```
 
@@ -430,8 +586,8 @@ Checks all rental items back into a yard location. Sets `returned_at = CURRENT_T
 ```json
 {
   "message": "Rental agreement successfully returned. All items freed and checked into yard.",
-  "rental_id": 4,
-  "returned_items_count": 1
+  "rental_id": 1,
+  "returned_items_count": 5
 }
 ```
 
@@ -439,15 +595,12 @@ Checks all rental items back into a yard location. Sets `returned_at = CURRENT_T
 
 ### 16. `GET /api/materials`
 
-Lists consumable materials inventory with live stock on hand derived dynamically via `SUM(stock_movements.qty)`.
+Lists consumable materials inventory with stock on hand calculated from `SUM(sm.qty)`.
 
 - **Method**: `GET`
 - **Path**: `/api/materials`
 - **Auth Required**: `Bearer <token>` (`admin` or `staff`)
-- **Query Parameters**:
-  - `category_id` (optional integer)
-  - `low_stock` (optional boolean, `'true'` returns items at or below `reorder_level`)
-  - `q` (optional string search on SKU or item name)
+- **Query Parameters**: `category_id`, `low_stock` (`true`), `q` (search SKU/name)
 
 #### Response (200 OK)
 ```json
@@ -455,15 +608,12 @@ Lists consumable materials inventory with live stock on hand derived dynamically
   "data": [
     {
       "id": 1,
-      "sku": "MS-PL-6MM",
-      "name": "Mild Steel Plate 6mm (4x8 ft)",
-      "category_id": 1,
-      "category_name": "Steel & Metal Sheets",
-      "unit_id": 1,
-      "unit_code": "pcs",
-      "unit_name": "Pieces",
-      "reorder_level": "15.000",
-      "current_stock": "45.000",
+      "sku": "MAT-LUB-001",
+      "name": "Hydraulic Oil ISO VG 46 (200L Drum)",
+      "category_name": "Fluids & Lubricants",
+      "unit_code": "drum",
+      "reorder_level": "5.000",
+      "current_stock": "18.000",
       "is_low_stock": false
     }
   ]
@@ -536,13 +686,16 @@ Records an inventory movement in the append-only ledger (`receipt`, `issue`, `ad
 
 ### 20. `GET /api/materials/:id/price-history`
 
-Captures purchase price fluctuations over time directly from supplier invoice lines. **Admin only.**
+Captures purchase price fluctuations over time directly from supplier invoice lines and computes inventory valuation. **Admin only.**
+
+> [!NOTE]
+> Offline goods receipts (which have `unit_cost IS NULL`) and unpriced movements are strictly excluded from price history and weighted average cost calculations, preserving financial valuation accuracy without dilution from unpriced quantities.
 
 - **Method**: `GET`
 - **Path**: `/api/materials/:id/price-history`
 - **Auth Required**: `Bearer <token>` (`role: 'admin'`)
 
-#### Response (200 OK)
+#### Response (200 OK — Admin Only)
 ```json
 {
   "item_id": 1,
@@ -560,7 +713,13 @@ Captures purchase price fluctuations over time directly from supplier invoice li
       "unit_price": "240.00",
       "line_total": "12000.00"
     }
-  ]
+  ],
+  "valuation": {
+    "total_valuation": 12000.00,
+    "average_cost": 240.00,
+    "priced_qty": 50.000,
+    "priced_receipts_count": 1
+  }
 }
 ```
 
@@ -636,3 +795,241 @@ Stores a received supplier invoice with item lines, updating material purchase p
   "lines_recorded": 1
 }
 ```
+
+---
+
+### 24. `GET /api/sync/snapshot`
+
+Returns cacheable operational data according to the caller's role for offline client storage. Supports HTTP conditional caching via deterministic ETag and private caching headers.
+
+- **Method**: `GET`
+- **Path**: `/api/sync/snapshot`
+- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
+- **Response Headers**:
+  - `Cache-Control: private` (prevents shared edge proxies from caching role-specific payloads)
+  - `ETag: W/"<sha256-hash>"`
+- **Conditional Request Headers**:
+  - `If-None-Match: W/"<sha256-hash>"` -> Returns `304 Not Modified` with empty body if server state is unchanged.
+
+#### Important: Client Clock Drift Correction
+The response body includes `server_time` (ISO 8601). Mobile and browser clients must calculate clock skew delta:
+$$\Delta t = \text{server\_time} - \text{client\_now}$$
+When creating offline events, clients must add $\Delta t$ to local time so `occurred_at` matches server time within the allowable 5-minute skew window (`CLOCK_SKEW_EXCEEDED`).
+
+#### Responses Comparison (Admin vs Staff)
+
+##### Staff Response (200 OK — Zero Commercial Rates / Prices)
+```json
+{
+  "server_time": "2026-10-29T13:30:00.000Z",
+  "etag": "W/\"3d9fa0e8b15e47a988d8b1e4a11f92e8\"",
+  "role": "staff",
+  "equipment": [
+    {
+      "id": 1,
+      "asset_code": "CRN-50-001",
+      "serial_no": "TD-500-9841",
+      "condition": "good",
+      "active": true,
+      "make": "Tadano",
+      "model": "GR-500EX",
+      "capacity_value": "50.00",
+      "type_name": "Rough Terrain Crane",
+      "capacity_unit": "ton",
+      "current_location_id": 1,
+      "current_location_name": "Dammam Central Yard",
+      "current_location_kind": "yard",
+      "status": "available",
+      "current_rental_id": null,
+      "current_customer_id": null,
+      "current_customer_name": null,
+      "current_site_name": null,
+      "current_maintenance_id": null
+    }
+  ],
+  "locations": [
+    { "id": 1, "name": "Dammam Central Yard", "kind": "yard" },
+    { "id": 2, "name": "Jubail Industrial Yard", "kind": "yard" },
+    { "id": 3, "name": "Central Maintenance Workshop", "kind": "workshop" }
+  ],
+  "materials": [
+    {
+      "id": 1,
+      "sku": "MAT-LUB-001",
+      "name": "Hydraulic Oil ISO VG 46 (200L Drum)",
+      "category_name": "Fluids & Lubricants",
+      "unit_code": "drum",
+      "stock_on_hand": "18.000",
+      "reorder_level": "5.000",
+      "is_low_stock": false
+    }
+  ]
+}
+```
+
+##### Admin Response (200 OK — Includes Rate Cards)
+```json
+{
+  "server_time": "2026-10-29T13:30:00.000Z",
+  "etag": "W/\"8a11bc4ef91102eac33190ab77221e90\"",
+  "role": "admin",
+  "equipment": [ /* equipment fleet array */ ],
+  "locations": [ /* locations array */ ],
+  "materials": [ /* materials array */ ],
+  "standard_rates": [
+    {
+      "model_id": 1,
+      "make": "Tadano",
+      "model": "GR-500EX",
+      "unit": "monthly",
+      "amount": "35000.00",
+      "vat_included": false,
+      "valid_from": "2026-01-01T00:00:00.000Z"
+    }
+  ]
+}
+```
+
+##### Conditional Cache Response (304 Not Modified)
+- **Status**: `304 Not Modified`
+- **Headers**:
+  - `ETag: W/"3d9fa0e8b15e47a988d8b1e4a11f92e8"`
+  - `Cache-Control: private`
+- **Body**: *Empty*
+
+---
+
+### 25. `POST /api/sync`
+
+Batch replayer for offline field events. Accepts up to 50 events per batch.
+
+- **Method**: `POST`
+- **Path**: `/api/sync`
+- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
+- **Batch Processing Guarantees**:
+  1. **Strict Ordering**: Events are sorted and processed in ascending physical `occurred_at` order.
+  2. **Per-Event Transaction Isolation**: Each event executes in its own isolated transaction (`BEGIN ... COMMIT / ROLLBACK`). A failure in event #3 does not roll back event #1 or event #2.
+  3. **Idempotency**: Client-generated UUID (`client_event_id`) ensures duplicate replays return stored results without side-effects.
+  4. **Precondition Re-evaluation**: All business rules are re-verified at sync time.
+  5. **Negative Stock Concurrency Guard**: Stock decrements acquire row-level locks on the item (`FOR UPDATE`) inside the database trigger `trg_check_stock_movement_non_negative`, guaranteeing concurrent sync requests cannot over-draw inventory.
+  6. **Audit Retention**: Rejected events are never dropped; their rejection status and reason are permanently stored in `sync_events`.
+  7. **Financial Redaction**: Staff sync responses physically omit commercial rates and prices.
+
+#### Supported Event Types
+- `equipment.move`: Relocate equipment to yard, site, or workshop.
+- `equipment.return`: Check in equipment from rental. Closes rental agreement when all items on that agreement are returned.
+- `equipment.repair`: Open maintenance work order and send equipment to workshop.
+- `material.goods_received`: Record physical receipt of consumable stock (stored with `unit_cost = NULL`).
+- `material.issue`: Deduct material inventory from stock (blocked if requested quantity exceeds current stock).
+
+#### Request Body
+```json
+{
+  "events": [
+    {
+      "client_event_id": "7b8e5c4a-9123-4dfb-8a21-9311e4210ab1",
+      "user_id": 2,
+      "type": "equipment.move",
+      "payload": {
+        "asset_code": "CRN-50-001",
+        "location_id": 2,
+        "note": "Moved to Jubail Yard"
+      },
+      "occurred_at": "2026-10-29T10:15:00.000Z"
+    },
+    {
+      "client_event_id": "8c9f6d5b-0234-4efc-9b32-0422f5321bc2",
+      "user_id": 2,
+      "type": "material.goods_received",
+      "payload": {
+        "item_id": 1,
+        "qty": 10.000,
+        "note": "Field delivery of hydraulic oil"
+      },
+      "occurred_at": "2026-10-29T10:20:00.000Z"
+    },
+    {
+      "client_event_id": "9da07e6c-1345-4ffd-ac43-153306432cd3",
+      "user_id": 2,
+      "type": "material.issue",
+      "payload": {
+        "item_id": 1,
+        "qty": 500.000,
+        "note": "Exceeds available stock"
+      },
+      "occurred_at": "2026-10-29T10:25:00.000Z"
+    }
+  ]
+}
+```
+
+#### Response (200 OK — Mixed Results Example)
+```json
+{
+  "processed": 3,
+  "results": [
+    {
+      "client_event_id": "7b8e5c4a-9123-4dfb-8a21-9311e4210ab1",
+      "status": "accepted",
+      "result": {
+        "action": "equipment.move",
+        "asset_code": "CRN-50-001",
+        "new_location_id": 2,
+        "location_name": "Jubail Industrial Yard",
+        "equipment": {
+          "asset_code": "CRN-50-001",
+          "status": "available",
+          "current_location_id": 2,
+          "current_location_name": "Jubail Industrial Yard"
+        }
+      }
+    },
+    {
+      "client_event_id": "8c9f6d5b-0234-4efc-9b32-0422f5321bc2",
+      "status": "accepted",
+      "result": {
+        "action": "material.goods_received",
+        "movement_id": 55,
+        "item_id": 1,
+        "delta_qty": 10.000,
+        "current_stock": 28.000
+      }
+    },
+    {
+      "client_event_id": "9da07e6c-1345-4ffd-ac43-153306432cd3",
+      "status": "rejected",
+      "error": "INSUFFICIENT_STOCK",
+      "message": "Stock cannot become negative"
+    }
+  ]
+}
+```
+
+#### Duplicate Replay Response
+When re-submitting an already processed `client_event_id`:
+```json
+{
+  "client_event_id": "7b8e5c4a-9123-4dfb-8a21-9311e4210ab1",
+  "status": "duplicate",
+  "result": {
+    "action": "equipment.move",
+    "asset_code": "CRN-50-001",
+    "new_location_id": 2,
+    "location_name": "Jubail Industrial Yard"
+  }
+}
+```
+
+#### Rejection Error Codes
+| Rejection Code | Description | Cause |
+| :--- | :--- | :--- |
+| `CLOCK_SKEW_EXCEEDED` | Event `occurred_at` timestamp is > 5 minutes in the future | Client clock out of sync with server |
+| `USER_MISMATCH` | `event.user_id` does not match the authenticated JWT token | Device credential tampering |
+| `INSUFFICIENT_STOCK` | Stock cannot become negative | Precondition check or concurrency trigger blocked over-draw |
+| `NOT_RENTED` | Cannot return equipment that is not actively rented | Asset already returned or never rented |
+| `ALREADY_UNDER_REPAIR` | Equipment already has an open maintenance work order | Duplicate repair dispatched |
+| `EQUIPMENT_RENTED` | Cannot send equipment to repair while on active rental | Must return to yard first |
+| `EQUIPMENT_NOT_FOUND` | Specified `asset_code` not found in database | Stale QR code or non-existent asset |
+| `LOCATION_NOT_FOUND` | Destination `location_id` does not exist | Invalid location selected |
+| `ITEM_NOT_FOUND` | Material `item_id` not found or deactivated | Invalid material SKU |
+| `UNSUPPORTED_EVENT_TYPE` | Event type not in scope for offline sync | Administrative or financial event attempted offline |

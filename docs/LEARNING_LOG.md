@@ -914,3 +914,82 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    ```
    *Expected Result*: `tsc --noEmit` exits with 0 errors.
 4. Follow the manual DevTools demo procedure in `docs/DEMO.md`.
+
+---
+
+## Step O4 Hardening: Unpriced Stock Accounting, Rental Multi-Item Closure, Private Cache Control, and Row-Locked Concurrency
+
+### What we built:
+1. **Unpriced Stock Receipts (`unit_cost IS NULL`) & Valuation Integrity**:
+   - Updated offline `material.goods_received` and unpriced movements to insert `unit_cost = NULL` (instead of `0.00`).
+   - Created database migration `backend/migrations/1730000000002_allow_null_unit_cost.sql` to drop `NOT NULL` and default `0.00` constraints on `stock_movements.unit_cost`.
+   - Updated `GET /api/materials/:id/price-history` to compute inventory valuation (`total_valuation`, `average_cost`, `priced_qty`, `priced_receipts_count`) while strictly excluding `unit_cost IS NULL` rows. This ensures field deliveries pending supplier invoices never artificially dilute inventory valuation or weighted average costs.
+2. **Multi-Item Rental Return Verification**:
+   - Verified and proved that returning an equipment asset on a multi-item rental agreement (`equipment.return`) only closes the rental agreement (updating `rentals.status = 'returned'`) when **ALL** rental line items have been returned (`COUNT(*) WHERE returned_at IS NULL = 0`).
+   - Partial returns return the asset to available yard inventory while keeping the rental contract active.
+3. **HTTP Cache-Control Private Header**:
+   - Added `Cache-Control: private` header to `GET /api/sync/snapshot` alongside deterministic ETags. Ensures downstream shared proxies/CDNs never cache role-specific data.
+4. **Row-Locked Concurrency Trigger Enforcement**:
+   - Created database migration `backend/migrations/1730000000003_stock_trigger_concurrency_lock.sql` updating `check_stock_movement_non_negative()`.
+   - Added explicit parent item row lock (`PERFORM id FROM items WHERE id = NEW.item_id FOR UPDATE`) inside the trigger before calculating `SUM(qty)`.
+   - Under PostgreSQL's `READ COMMITTED` isolation, two parallel sync requests issuing the last remaining stock unit are serialized: the second transaction waits for the first to commit, re-evaluates available stock as 0, and is blocked by the trigger raising `INSUFFICIENT_STOCK`.
+5. **Complete API Reference (`docs/API.md`)**:
+   - Generated full documentation covering all 25 endpoints (including `/api/sync` and `/api/sync/snapshot`), role-based request/response JSON for Admin and Staff, and client clock drift correction guides.
+6. **Automated Integration Tests**:
+   - Added 4 comprehensive tests to `backend/src/__tests__/offline_events.test.ts` (bringing the test suite to **83 passing tests** across 7 test files).
+
+### Why it exists:
+- **Commercial Valuation Accuracy**: Field yard workers logging receipts of steel plates or lubricants have no legal knowledge of negotiated commercial prices. Recording `0.00` as cost would misrepresent balance sheets by falsely claiming free inventory.
+- **Contractual Integrity**: Rental contracts frequently bundle multiple machines (e.g. 2 cranes and 1 generator). If returning the first crane prematurely marked the rental as `'returned'`, billing would prematurely terminate while the customer still held the remaining machines on site.
+- **Data Privacy & Caching Compliance**: Shared edge proxies must never serve an Admin snapshot (with rate cards) to a Staff worker, or vice-versa. `Cache-Control: private` guarantees caching is restricted to the caller's private browser/device cache.
+- **Zero Race-Condition Inventory Integrity**: If two technicians in remote yards issue the final drum of oil simultaneously, client-side or uncommitted application checks would permit both, causing negative physical inventory. Database row locking guarantees atomic serialization.
+
+### Why this way:
+- **Row Locking in DB Trigger over Application-Level Locks**:
+  - *Alternative 1 Rejected (Relying solely on Express/controller `SELECT ... FOR UPDATE`)*: Any future direct SQL script, admin migration, or alternate microservice could bypass application locks. Placing `PERFORM ... FOR UPDATE` inside the `BEFORE INSERT` trigger enforces serialization at the database engine level, impossible to bypass.
+- **NULL Cost over Sentinel Values (e.g., -1.00 or 0.00)**:
+  - *Alternative 2 Rejected (Using 0.00 or sentinel flag)*: Sentinel values corrupt mathematical aggregates (`AVG()`, `SUM(qty * unit_cost)`). In standard relational database theory, `NULL` correctly signifies "unknown / pending invoice". Standard SQL aggregates ignore `NULL` naturally.
+
+### How it works:
+1. Field technician records 50 units of oil received offline. The event syncs with `unit_cost = NULL`.
+2. When management checks `GET /api/materials/:id/price-history`, the query aggregates `SUM(qty * unit_cost)` strictly over `unit_cost IS NOT NULL AND qty > 0`. The 50 unpriced units increase physical stock on hand without altering the average cost per unit.
+3. When a technician returns machine #1 of a 2-machine rental, `handleEquipmentReturn` sets `returned_at` on item #1, verifies `COUNT(*) WHERE returned_at IS NULL = 1` (> 0), and leaves `rentals.status` open.
+4. When machine #2 is returned, `COUNT(*) WHERE returned_at IS NULL = 0`, triggering `UPDATE rentals SET status = 'returned'`.
+5. Two parallel HTTP requests hit `POST /api/sync` simultaneously issuing 1 unit from an item with 1 unit in stock.
+6. Both execute `INSERT INTO stock_movements`. The Postgres trigger executes `PERFORM id FROM items WHERE id = NEW.item_id FOR UPDATE`.
+7. Request A locks the item, sees 1 unit in stock, and inserts.
+8. Request B waits for the lock. Upon Request A's commit, Request B reads committed stock (0 units), calculates `0 - 1 = -1 < 0`, and the trigger throws an exception.
+9. `syncController` catches the trigger error, categorizes it as `INSUFFICIENT_STOCK`, rolls back Request B, records the rejection in `sync_events`, and returns HTTP 200 with `status: 'rejected'`.
+
+### Concepts used:
+- **Pessimistic Row Locking (`FOR UPDATE`) in DB Triggers**: Enforcing concurrency boundaries against phantom reads under `READ COMMITTED` isolation.
+- **Three-Valued SQL Logic & `NULL` Semantics**: Differentiating between free items (cost 0.00) and unbilled inventory (cost NULL) in financial accounting.
+- **Partial vs Complete Contract State Transitions**: Modeling aggregate line-item lifecycle completion before transitioning root entities.
+- **RFC 7234 Private Cache Directives**: Directing intermediate proxies not to store authenticated, role-sensitive responses.
+
+### Risks and assumptions:
+- **Supplier Invoice Linking**: Unpriced stock movements (`unit_cost IS NULL`) should eventually be reconciled when the admin records the corresponding supplier invoice (`POST /api/invoices/supplier`).
+- **Deadlock Avoidance**: Because row locks are acquired only on parent `items` during decrements, deadlocks are avoided as movements lock a single item ID per insert.
+
+### 30-second explanation:
+> *"We hardened the offline sync engine against real-world edge cases. Field goods receipts now store cost as NULL so unpriced deliveries never warp company inventory valuation or average costs. Rental contracts with multiple machines now remain open until every single machine is checked back into a yard. Offline snapshots are marked private so edge servers never cache role data, and the database stock trigger now locks the item row, guaranteeing that two workers issuing the last spare part at the same millisecond can never drive inventory below zero."*
+
+### Likely questions:
+1. **"Why does the database trigger lock the `items` row instead of `stock_movements`?"**
+   *Answer*: In an append-only ledger, new rows in `stock_movements` do not exist yet to be locked. To serialize inserts that calculate an aggregate (`SUM(qty)`) across the ledger, we lock the shared parent row in `items`. This forces concurrent issue transactions for the same SKU to queue up sequentially.
+2. **"What happens to the inventory valuation when unpriced goods arrive?"**
+   *Answer*: Physical stock on hand increases immediately so workers can issue and use the parts. However, weighted average cost and financial valuation are calculated solely from priced receipts. Once accounting enters the supplier invoice, the price is officially recorded.
+3. **"If a customer rents 5 generators and returns 4, what status does the rental have?"**
+   *Answer*: The rental status remains 'picked_up' (or 'confirmed'). The 4 returned generators are marked returned with arrival timestamps and become immediately available in the yard for new jobs, but the rental agreement stays open until the 5th generator is returned.
+
+### How to verify:
+1. Run all backend automated test suites:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 7 test suites pass cleanly (**83 tests passed**, including all 28 tests in `offline_events.test.ts`).
+2. Verify TypeScript type checking:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: `tsc --noEmit` exits with 0 errors.

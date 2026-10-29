@@ -1042,4 +1042,320 @@ describe('Step O4: End-to-End Offline Field Scenarios & Multi-Device Concurrency
     expect(checkDb.rows.length).toBe(1);
     expect(checkDb.rows[0].status).toBe('rejected');
   });
+
+  it('stores unit_cost as NULL for offline goods received and excludes NULL costs from price history and valuation', async () => {
+    // 1. Create a dedicated test item
+    const catRes = await pool.query('SELECT id FROM item_categories LIMIT 1');
+    const unitRes = await pool.query('SELECT id FROM units LIMIT 1');
+    const sku = 'TEST-VALUATION-SKU';
+
+    await pool.query('DELETE FROM stock_movements WHERE item_id IN (SELECT id FROM items WHERE sku = $1)', [sku]);
+    await pool.query('DELETE FROM items WHERE sku = $1', [sku]);
+
+    const itemRes = await pool.query(
+      `INSERT INTO items (sku, name, category_id, unit_id, reorder_level, active)
+       VALUES ($1, 'Valuation Test Material', $2, $3, 10, true)
+       RETURNING id`,
+      [sku, catRes.rows[0].id, unitRes.rows[0].id]
+    );
+    const testItemId = itemRes.rows[0].id;
+
+    // Initial receipt with unit_cost = 100.00 (qty 10)
+    await pool.query(
+      `INSERT INTO stock_movements (item_id, qty, type, unit_cost, moved_by, note)
+       VALUES ($1, 10.000, 'receipt', 100.00, $2, 'Initial priced stock')`,
+      [testItemId, staffUser.id]
+    );
+
+    // Initial valuation: 10 units @ 100.00 = 1000.00, average cost = 100.00
+    const initialValRes = await request(app)
+      .get(`/api/materials/${testItemId}/price-history`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(initialValRes.status).toBe(200);
+    expect(initialValRes.body.valuation.average_cost).toBe(100);
+    expect(initialValRes.body.valuation.total_valuation).toBe(1000);
+    expect(initialValRes.body.valuation.priced_qty).toBe(10);
+    expect(initialValRes.body.valuation.priced_receipts_count).toBe(1);
+
+    // 2. Offline goods received event with 50 units (staff caller has no rates/costs)
+    const eventId = crypto.randomUUID();
+    const res = await request(app)
+      .post('/api/sync')
+      .set('Authorization', `Bearer ${staffToken}`)
+      .send({
+        events: [
+          {
+            client_event_id: eventId,
+            user_id: staffUser.id,
+            type: 'material.goods_received',
+            payload: { item_id: testItemId, qty: 50, note: 'Offline receipt without pricing' },
+            occurred_at: new Date(Date.now() - 2000).toISOString(),
+          },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].status).toBe('accepted');
+    const movementId = res.body.results[0].result.movement_id;
+
+    // 3. Confirm in database that unit_cost is strictly NULL (not 0.00)
+    const checkDb = await pool.query(
+      'SELECT unit_cost, qty, type FROM stock_movements WHERE id = $1',
+      [movementId]
+    );
+    expect(checkDb.rows.length).toBe(1);
+    expect(checkDb.rows[0].unit_cost).toBeNull();
+    expect(parseFloat(checkDb.rows[0].qty)).toBe(50);
+
+    // 4. Query price history and valuation as Admin: unpriced receipt must NOT dilute average_cost!
+    const postValRes = await request(app)
+      .get(`/api/materials/${testItemId}/price-history`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(postValRes.status).toBe(200);
+    expect(postValRes.body.valuation.average_cost).toBe(100);
+    expect(postValRes.body.valuation.total_valuation).toBe(1000);
+    expect(postValRes.body.valuation.priced_qty).toBe(10);
+    expect(postValRes.body.valuation.priced_receipts_count).toBe(1);
+
+    // 5. Query movements as Admin: unit_cost is null
+    const movRes = await request(app)
+      .get(`/api/materials/${testItemId}/movements`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    const receiptMovement = movRes.body.data.find((m) => Number(m.id) === Number(movementId));
+    expect(receiptMovement).toBeDefined();
+    expect(receiptMovement.unit_cost).toBeNull();
+
+    // Clean up
+    await pool.query('DELETE FROM sync_events WHERE client_event_id = $1', [eventId]);
+    await pool.query('DELETE FROM stock_movements WHERE item_id = $1', [testItemId]);
+    await pool.query('DELETE FROM items WHERE id = $1', [testItemId]);
+  });
+
+  it('only closes the rental agreement when ALL equipment line items are returned', async () => {
+    // 1. Create two test equipment items
+    const modelRes = await pool.query('SELECT id FROM equipment_models LIMIT 1');
+    const modelId = modelRes.rows[0].id;
+    const locRes = await pool.query("SELECT id FROM locations WHERE kind = 'yard' LIMIT 1");
+    const yardLocId = locRes.rows[0].id;
+    const siteLocRes = await pool.query("SELECT id FROM locations WHERE kind = 'client_site' LIMIT 1");
+    const siteLocId = siteLocRes.rows[0].id;
+    const custRes = await pool.query("SELECT id FROM parties WHERE is_customer = true LIMIT 1");
+    const custId = custRes.rows[0].id;
+
+    const code1 = 'TEST-MULTI-EQ1';
+    const code2 = 'TEST-MULTI-EQ2';
+
+    await pool.query('DELETE FROM location_log WHERE equipment_id IN (SELECT id FROM equipment WHERE asset_code IN ($1, $2))', [code1, code2]);
+    await pool.query('DELETE FROM rental_items WHERE equipment_id IN (SELECT id FROM equipment WHERE asset_code IN ($1, $2))', [code1, code2]);
+    await pool.query('DELETE FROM equipment WHERE asset_code IN ($1, $2)', [code1, code2]);
+
+    const eq1 = (await pool.query("INSERT INTO equipment (asset_code, model_id, condition) VALUES ($1, $2, 'good') RETURNING id", [code1, modelId])).rows[0].id;
+    const eq2 = (await pool.query("INSERT INTO equipment (asset_code, model_id, condition) VALUES ($1, $2, 'good') RETURNING id", [code2, modelId])).rows[0].id;
+
+    let rentalId: string | number = 0;
+    const return1EventId = crypto.randomUUID();
+    const return2EventId = crypto.randomUUID();
+
+    try {
+      // Log initial locations
+      await pool.query('INSERT INTO location_log (equipment_id, location_id, moved_by, moved_at) VALUES ($1, $2, $3, NOW())', [eq1, yardLocId, staffUser.id]);
+      await pool.query('INSERT INTO location_log (equipment_id, location_id, moved_by, moved_at) VALUES ($1, $2, $3, NOW())', [eq2, yardLocId, staffUser.id]);
+
+      // Create a rental with status = 'confirmed' containing BOTH items
+      const rentalInsert = await pool.query(
+        `INSERT INTO rentals (customer_id, site_id, status, start_date, expected_end)
+         VALUES ($1, $2, 'confirmed', CURRENT_DATE, CURRENT_DATE + INTERVAL '14 days')
+         RETURNING id`,
+        [custId, siteLocId]
+      );
+      rentalId = rentalInsert.rows[0].id;
+
+      await pool.query(
+        `INSERT INTO rental_items (rental_id, equipment_id, applied_rate, rate_unit)
+         VALUES ($1, $2, 500.00, 'daily'), ($1, $3, 500.00, 'daily')`,
+        [rentalId, eq1, eq2]
+      );
+
+      // Verify rental starts in 'confirmed' status
+      const rStart = await pool.query('SELECT status FROM rentals WHERE id = $1', [rentalId]);
+      expect(rStart.rows[0].status).toBe('confirmed');
+
+      // 2. First staff syncs return for eq1 only (partial return)
+      const res1 = await request(app)
+        .post('/api/sync')
+        .set('Authorization', `Bearer ${staffToken}`)
+        .send({
+          events: [
+            {
+              client_event_id: return1EventId,
+              user_id: staffUser.id,
+              type: 'equipment.return',
+              payload: { asset_code: code1, location_id: yardLocId, note: 'Partial return item 1' },
+              occurred_at: new Date(Date.now() - 2000).toISOString(),
+            },
+          ],
+        });
+
+      expect(res1.status).toBe(200);
+      expect(res1.body.results[0].status).toBe('accepted');
+
+      // CRUCIAL: rental agreement must still be 'confirmed' because eq2 is still out!
+      const rAfterPartial = await pool.query('SELECT status FROM rentals WHERE id = $1', [rentalId]);
+      expect(rAfterPartial.rows[0].status).toBe('confirmed');
+
+      // Verify eq1 is available, but eq2 is still rented
+      const vEq1 = await pool.query('SELECT status FROM v_equipment_current WHERE id = $1', [eq1]);
+      const vEq2 = await pool.query('SELECT status FROM v_equipment_current WHERE id = $1', [eq2]);
+      expect(vEq1.rows[0].status).toBe('available');
+      expect(vEq2.rows[0].status).toBe('rented');
+
+      // 3. Now return second item eq2 (full return)
+      const res2 = await request(app)
+        .post('/api/sync')
+        .set('Authorization', `Bearer ${staffToken}`)
+        .send({
+          events: [
+            {
+              client_event_id: return2EventId,
+              user_id: staffUser.id,
+              type: 'equipment.return',
+              payload: { asset_code: code2, location_id: yardLocId, note: 'Final return item 2' },
+              occurred_at: new Date(Date.now() - 1000).toISOString(),
+            },
+          ],
+        });
+
+      expect(res2.status).toBe(200);
+      expect(res2.body.results[0].status).toBe('accepted');
+
+      // Now ALL items are returned, rental agreement status MUST transition to 'returned'
+      const rAfterFinal = await pool.query('SELECT status FROM rentals WHERE id = $1', [rentalId]);
+      expect(rAfterFinal.rows[0].status).toBe('returned');
+    } finally {
+      // Clean up in finally to guarantee no dirty records linger
+      await pool.query('DELETE FROM sync_events WHERE client_event_id IN ($1, $2)', [return1EventId, return2EventId]);
+      await pool.query('DELETE FROM location_log WHERE equipment_id IN ($1, $2)', [eq1, eq2]);
+      if (rentalId) {
+        await pool.query('DELETE FROM rental_items WHERE rental_id = $1', [rentalId]);
+        await pool.query('DELETE FROM rentals WHERE id = $1', [rentalId]);
+      }
+      await pool.query('DELETE FROM equipment WHERE id IN ($1, $2)', [eq1, eq2]);
+    }
+  });
+
+  it('returns Cache-Control: private header on GET /api/sync/snapshot', async () => {
+    const res = await request(app)
+      .get('/api/sync/snapshot')
+      .set('Authorization', `Bearer ${staffToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.headers['cache-control']).toBe('private');
+    expect(res.headers['etag']).toBeDefined();
+  });
+
+  it('concurrency test: two parallel syncs issuing the last stock unit confirm DB trigger blocks the second', async () => {
+    // 1. Create an isolated material item with stock = 0
+    const catRes = await pool.query('SELECT id FROM item_categories LIMIT 1');
+    const unitRes = await pool.query('SELECT id FROM units LIMIT 1');
+    const sku = 'TEST-CONCURRENCY-SKU';
+
+    await pool.query('DELETE FROM stock_movements WHERE item_id IN (SELECT id FROM items WHERE sku = $1)', [sku]);
+    await pool.query('DELETE FROM items WHERE sku = $1', [sku]);
+
+    const itemRes = await pool.query(
+      `INSERT INTO items (sku, name, category_id, unit_id, reorder_level, active)
+       VALUES ($1, 'Concurrency Test Material', $2, $3, 0, true)
+       RETURNING id`,
+      [sku, catRes.rows[0].id, unitRes.rows[0].id]
+    );
+    const testItemId = itemRes.rows[0].id;
+
+    const eventIdA = crypto.randomUUID();
+    const eventIdB = crypto.randomUUID();
+
+    try {
+      // 2. Deposit exactly 1.000 unit into stock
+      await pool.query(
+        `INSERT INTO stock_movements (item_id, qty, type, unit_cost, moved_by, note)
+         VALUES ($1, 1.000, 'receipt', NULL, $2, 'Initial 1 unit for race condition test')`,
+        [testItemId, staffUser.id]
+      );
+
+      // Verify starting stock is exactly 1.000
+      const startStockRes = await pool.query(
+        'SELECT COALESCE(SUM(qty), 0)::numeric(12,3) AS stock FROM stock_movements WHERE item_id = $1',
+        [testItemId]
+      );
+      expect(parseFloat(startStockRes.rows[0].stock)).toBe(1.0);
+
+      // 3. Prepare two distinct sync requests, each issuing 1 unit
+      const reqA = request(app)
+        .post('/api/sync')
+        .set('Authorization', `Bearer ${staffToken}`)
+        .send({
+          events: [
+            {
+              client_event_id: eventIdA,
+              user_id: staffUser.id,
+              type: 'material.issue',
+              payload: { item_id: testItemId, qty: 1.0, note: 'Parallel Issue Request A' },
+              occurred_at: new Date(Date.now() - 500).toISOString(),
+            },
+          ],
+        });
+
+      const reqB = request(app)
+        .post('/api/sync')
+        .set('Authorization', `Bearer ${staffToken}`)
+        .send({
+          events: [
+            {
+              client_event_id: eventIdB,
+              user_id: staffUser.id,
+              type: 'material.issue',
+              payload: { item_id: testItemId, qty: 1.0, note: 'Parallel Issue Request B' },
+              occurred_at: new Date(Date.now() - 500).toISOString(),
+            },
+          ],
+        });
+
+      // Fire both requests concurrently in parallel
+      const [resA, resB] = await Promise.all([reqA, reqB]);
+
+      expect(resA.status).toBe(200);
+      expect(resB.status).toBe(200);
+
+      const resultA = resA.body.results[0];
+      const resultB = resB.body.results[0];
+
+      // Exactly one must be accepted, and exactly one must be rejected with INSUFFICIENT_STOCK
+      const statuses = [resultA.status, resultB.status].sort();
+      expect(statuses).toEqual(['accepted', 'rejected']);
+
+      const rejectedResult = resultA.status === 'rejected' ? resultA : resultB;
+      expect(rejectedResult.error).toBe('INSUFFICIENT_STOCK');
+      expect(rejectedResult.message).toContain('Stock cannot become negative');
+
+      // Verify resulting database stock is exactly 0.000 (never negative!)
+      const finalStockRes = await pool.query(
+        'SELECT COALESCE(SUM(qty), 0)::numeric(12,3) AS stock FROM stock_movements WHERE item_id = $1',
+        [testItemId]
+      );
+      expect(parseFloat(finalStockRes.rows[0].stock)).toBe(0.0);
+
+      // Verify rejection audit entry is persisted in sync_events
+      const syncRejection = await pool.query(
+        'SELECT * FROM sync_events WHERE client_event_id = $1',
+        [rejectedResult.client_event_id]
+      );
+      expect(syncRejection.rows.length).toBe(1);
+      expect(syncRejection.rows[0].status).toBe('rejected');
+    } finally {
+      // Clean up in finally
+      await pool.query('DELETE FROM sync_events WHERE client_event_id IN ($1, $2)', [eventIdA, eventIdB]);
+      await pool.query('DELETE FROM stock_movements WHERE item_id = $1', [testItemId]);
+      await pool.query('DELETE FROM items WHERE id = $1', [testItemId]);
+    }
+  });
+
 });

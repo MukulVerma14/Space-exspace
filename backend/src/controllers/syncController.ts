@@ -41,6 +41,7 @@ const singleEventSchema = z.object({
  * - Locations list (yards, client sites, workshops)
  * - Materials items list with current stock levels
  * Includes server_time and deterministic ETag header for conditional requests (If-None-Match).
+ * Header Cache-Control: private ensures edge proxies do not cache role-specific payloads.
  * Staff responses contain zero financial or money fields (rates, prices, costs).
  */
 export async function getSyncSnapshot(req: Request, res: Response): Promise<void> {
@@ -125,6 +126,7 @@ export async function getSyncSnapshot(req: Request, res: Response): Promise<void
     .digest('hex');
   const etag = `W/"${contentHash.substring(0, 32)}"`;
 
+  res.setHeader('Cache-Control', 'private');
   res.setHeader('ETag', etag);
 
   // Handle conditional request (If-None-Match)
@@ -295,15 +297,18 @@ export async function processSyncBatch(req: Request, res: Response): Promise<voi
       await client.query('ROLLBACK');
 
       let rejection: EventRejection;
-      if (isEventRejection(err)) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+
+      if (
+        errorMsg.includes('Stock cannot become negative') ||
+        errorMsg.includes('Cannot issue') ||
+        errorMsg.includes('trg_check_stock_movement_non_negative')
+      ) {
+        rejection = { code: 'INSUFFICIENT_STOCK', message: 'Stock cannot become negative' };
+      } else if (isEventRejection(err)) {
         rejection = err;
       } else {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        if (errorMsg.includes('Stock cannot become negative') || errorMsg.includes('Cannot issue')) {
-          rejection = { code: 'INSUFFICIENT_STOCK', message: 'Stock cannot become negative' };
-        } else {
-          rejection = { code: 'EXECUTION_ERROR', message: errorMsg };
-        }
+        rejection = { code: 'EXECUTION_ERROR', message: errorMsg };
       }
 
       // NEVER silently drop a rejected event: record in sync_events
@@ -335,7 +340,10 @@ export async function processSyncBatch(req: Request, res: Response): Promise<voi
 }
 
 function isEventRejection(err: unknown): err is EventRejection {
-  return typeof err === 'object' && err !== null && 'code' in err && 'message' in err;
+  if (err instanceof Error && ('routine' in err || (err as any).code === 'P0001')) {
+    return false;
+  }
+  return typeof err === 'object' && err !== null && 'code' in err && 'message' in err && (err as any).code !== 'P0001';
 }
 
 /**
@@ -474,6 +482,7 @@ async function handleEquipmentMove(
 /**
  * Replays an equipment return from customer site.
  * Re-checks precondition: equipment MUST be actively rented.
+ * If all items on this rental are returned, closes the rental agreement (status = 'returned').
  */
 async function handleEquipmentReturn(
   client: PoolClient,
@@ -665,6 +674,7 @@ async function handleEquipmentRepair(
 /**
  * Replays goods received (materials).
  * Scope: Qty-only (no unit_costs or prices permitted in offline mode).
+ * Inserts unit_cost = NULL so offline receipts do not distort pricing history or inventory valuation.
  */
 async function handleMaterialGoodsReceived(
   client: PoolClient,
@@ -691,10 +701,10 @@ async function handleMaterialGoodsReceived(
 
   const positiveQty = Math.abs(qty);
 
-  // Insert stock movement with unit_cost = 0.00 (qty-only)
+  // Insert stock movement with unit_cost = NULL (qty-only offline receipt)
   const insertRes = await client.query(
     `INSERT INTO stock_movements (item_id, qty, type, unit_cost, moved_by, note, moved_at, recorded_at)
-     VALUES ($1, $2, 'receipt', 0.00, $3, $4, $5, CURRENT_TIMESTAMP)
+     VALUES ($1, $2, 'receipt', NULL, $3, $4, $5, CURRENT_TIMESTAMP)
      RETURNING id`,
     [itemId, positiveQty, userId, note, occurredAt]
   );
@@ -716,6 +726,7 @@ async function handleMaterialGoodsReceived(
 /**
  * Replays material issue.
  * Precondition: Cannot issue stock below zero.
+ * Inserts unit_cost = NULL for offline field issues.
  */
 async function handleMaterialIssue(
   client: PoolClient,
@@ -756,10 +767,10 @@ async function handleMaterialIssue(
     };
   }
 
-  // Insert signed stock movement
+  // Insert signed stock movement with unit_cost = NULL
   const insertRes = await client.query(
     `INSERT INTO stock_movements (item_id, qty, type, unit_cost, maintenance_id, moved_by, note, moved_at, recorded_at)
-     VALUES ($1, $2, 'issue', 0.00, $3, $4, $5, $6, CURRENT_TIMESTAMP)
+     VALUES ($1, $2, 'issue', NULL, $3, $4, $5, $6, CURRENT_TIMESTAMP)
      RETURNING id`,
     [itemId, signedQty, maintenanceId, userId, note, occurredAt]
   );
