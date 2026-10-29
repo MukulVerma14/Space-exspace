@@ -736,3 +736,106 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    npm --workspace=backend run lint
    ```
    *Expected Result*: `tsc --noEmit` exits with 0 errors.
+
+---
+
+## Step O3: Role-Based Read Snapshots and ETag Caching
+
+### What we built:
+- **Read Snapshot Endpoint (`GET /api/sync/snapshot`)**:
+  - Implemented `getSyncSnapshot` in `backend/src/controllers/syncController.ts` and mounted in `backend/src/routes/syncRoutes.ts`.
+  - Accessible to authenticated Staff and Admin roles.
+  - Returns unified operational data needed for offline field operation:
+    - `equipment`: Derived fleet status and current location directly from `v_equipment_current`.
+    - `locations`: Active operational sites (yards, client sites, workshops).
+    - `materials`: Items catalog with real-time `stock_on_hand` calculated from the append-only `stock_movements` ledger.
+    - `server_time`: UTC ISO 8601 server timestamp allowing mobile devices to calculate and compensate for local clock drift.
+    - `etag`: Deterministic SHA-256 content hash of the role-sanitized data payload.
+- **HTTP 304 Not Modified Caching**:
+  - Evaluates standard `If-None-Match` HTTP request header against the calculated snapshot ETag.
+  - When operational data has not changed, immediately returns HTTP `304 Not Modified` with zero response body, minimizing cellular bandwidth consumption and mobile battery usage.
+  - Emits fresh HTTP 200 responses with an updated ETag as soon as equipment relocates, status transitions, or inventory movements occur.
+- **Strict Role-Based Data Minimization (Defense-in-Depth)**:
+  - Enforces `sanitizeFinancials(rawSnapshot, userRole)` on all snapshot responses.
+  - Staff responses physically strip all commercial rate cards, rental rates, unit costs, invoice prices, and repair costs (`applied_rate`, `unit_cost`, `unit_price`, `cost`, `standard_rates`, `vat_included`).
+  - Admin responses include `standard_rates` for reference during quotations and rate management.
+- **Architectural Decision Record**: Documented in `docs/decisions/010-role-based-read-snapshots-and-etag-caching.md`.
+- **Automated Verification Suite (`backend/src/__tests__/offline_events.test.ts`)**:
+  - 6 new automated integration tests verifying:
+    1. Unauthenticated requests return HTTP 401.
+    2. Staff snapshot includes active equipment, locations, materials with current stock, server timestamp, and ETag header.
+    3. Staff snapshot contains zero financial or rate fields anywhere in the serialized JSON.
+    4. Admin snapshot contains `standard_rates` table.
+    5. Conditional GET with matching `If-None-Match` header returns HTTP 304 with empty body.
+    6. Database state mutations (inventory stock movements) cause the server to emit a fresh HTTP 200 with an updated ETag.
+
+### Why it exists:
+- **Client Requirement**: Mobile access for yard staff to scan a QR code and update location/status, functioning even in remote yards or basement workshops with intermittent or zero cellular connectivity (**CONFIRMED**).
+- **Client Requirement**: Two distinct roles (admin and staff) where staff scan QR codes and update status by physical action, without access to rates or prices (**CONFIRMED**).
+- **Core Mobile Offline Performance**: Before heading into dead zones, field devices must download an authoritative, lightweight baseline of available machines and consumable stock. Re-fetching full datasets every few minutes drains mobile battery and cellular data quotas; conditional ETag caching ensures instant validation with near-zero data transfer.
+
+### Why this way:
+- **Consolidated Snapshot instead of Multiple REST Queries**:
+  - *Alternative 1 Rejected (Separate Endpoints for /equipment, /locations, /materials)*: Making multiple HTTP roundtrips over spotty 3G/LTE connections increases connection latency, risks partial downloads, and complicates cache invalidation across interdependent entities. A single consolidated snapshot provides atomic state synchronization.
+- **Server-Side Financial Stripping instead of Client-Side Masking**:
+  - *Alternative 2 Rejected (Hiding Rates via Frontend CSS/UI)*: Storing sensitive commercial hire rates or vendor purchase prices on staff mobile devices creates massive security exposure. Server-side stripping guarantees that even if a technician's device is decompiled or inspected offline, commercial rate cards are not present.
+- **Deterministic Content Hash ETag instead of Server Modification Timestamps**:
+  - *Alternative 3 Rejected (Last-Modified Header)*: PostgreSQL rows across multiple tables (`equipment`, `location_log`, `rentals`, `items`, `stock_movements`) have distinct timestamps. A SHA-256 hash of the sanitized JSON structure produces an unambiguous, collision-resistant ETag that changes only when meaningful data changes.
+
+### How it works:
+1. Mobile device connects and sends `GET /api/sync/snapshot` with Bearer JWT token.
+2. The server verifies caller role (`staff` or `admin`).
+3. The server concurrently executes:
+   - Query to `v_equipment_current` for active fleet status and locations.
+   - Query to `locations` for active operational sites.
+   - Query to `items` joined with `stock_movements` to aggregate `stock_on_hand`.
+   - If admin, queries `rates` table for standard rate cards.
+4. The server passes the aggregated object through `sanitizeFinancials()`.
+5. The server computes `sha256(JSON.stringify(sanitizedSnapshot)).substring(0, 32)` and formats it as `W/"<hash>"`.
+6. If the client sent `If-None-Match` matching this hash:
+   - Server returns HTTP 304 Not Modified immediately.
+7. Otherwise:
+   - Server returns HTTP 200 with `server_time`, `etag`, and the sanitized snapshot payload.
+
+### Concepts used:
+- **HTTP Conditional Requests & Cache Validation**: Standard RFC 7232 ETag and `If-None-Match` protocol for efficient bandwidth conservation.
+- **Server-Side Data Minimization**: Enforcing security boundaries at the API layer so sensitive commercial numbers never travel to unauthorized tiers.
+- **Authoritative Clock Synchronization**: Providing server UTC time in read snapshots so clients can calculate skew deltas before logging field actions.
+- **Single-Source Aggregated Derived State**: Sourcing equipment locations from `v_equipment_current` and inventory balances from `stock_movements` ledgers rather than separate caching tables.
+
+### Risks and assumptions:
+- **Assumption**: Field technicians perform initial login and initial snapshot synchronization while they have internet access before leaving the office or yard dispatch area.
+- **Scale Consideration**: For thousands of assets, downloading the snapshot payload takes <150KB of JSON. At enterprise scale (tens of thousands of assets), snapshots can be scoped by assigned geographic yard or division.
+
+### 30-second explanation:
+> *"We built the read snapshot system that field phones use to download their offline toolkit. When a yard worker opens the app, it pulls the current status and location of all equipment, yards, and available materials without downloading a single commercial price or rental rate. If the worker's phone already has the latest data, the server answers with a 304 Not Modified code that transfers zero bytes, preserving battery and mobile data."*
+
+### Likely questions:
+1. **"Can a staff member inspect the local storage or network packets on their phone to see client rental rates or equipment prices?"**
+   *Answer*: No. The server applies `sanitizeFinancials` directly to the snapshot data before serializing it or sending it over HTTP. Staff snapshots physically omit all rate, price, and cost fields.
+2. **"Why does the snapshot include an ETag and accept `If-None-Match`?"**
+   *Answer*: Technicians frequently enter and leave cellular coverage zones. If the mobile app re-downloaded the entire equipment list and inventory catalog every time cellular signal returned, it would waste bandwidth and drain battery. By sending `If-None-Match: <etag>`, the server checks in milliseconds if anything changed; if not, it returns HTTP 304 with no body.
+3. **"Why is `server_time` included in the snapshot response?"**
+   *Answer*: Mobile phone clocks often drift by minutes or hours due to manual adjustments or roaming between cell networks. When the app receives `server_time`, it calculates the difference between its local clock and the server clock, allowing it to record field actions with accurate physical occurrence times and avoid clock-skew rejections.
+
+### How to verify:
+1. Run all backend automated test suites:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 7 test suites pass cleanly (**75 tests passed**, including all 20 tests in `offline_events.test.ts`).
+2. Verify TypeScript type checking:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: `tsc --noEmit` exits with 0 errors.
+3. Verify ETag caching via curl:
+   ```bash
+   # 1. Fetch initial snapshot
+   curl -i -H "Authorization: Bearer <STAFF_JWT>" http://localhost:3000/api/sync/snapshot
+   # Note ETag header value: W/"..."
+
+   # 2. Re-fetch with If-None-Match
+   curl -i -H "Authorization: Bearer <STAFF_JWT>" -H 'If-None-Match: W/"..."' http://localhost:3000/api/sync/snapshot
+   # Expected: HTTP/1.1 304 Not Modified
+   ```

@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { PoolClient } from 'pg';
+import crypto from 'crypto';
 import { z } from 'zod';
 import { pool } from '../db/pool.js';
 import { findSyncEventById, persistSyncEvent } from '../services/syncEventService.js';
@@ -32,6 +33,115 @@ const singleEventSchema = z.object({
   payload: z.record(z.any()),
   occurred_at: z.string().or(z.date()),
 });
+
+/**
+ * Controller for GET /api/sync/snapshot
+ * Returns cacheable operational data according to caller's role:
+ * - Equipment list with current status and location
+ * - Locations list (yards, client sites, workshops)
+ * - Materials items list with current stock levels
+ * Includes server_time and deterministic ETag header for conditional requests (If-None-Match).
+ * Staff responses contain zero financial or money fields (rates, prices, costs).
+ */
+export async function getSyncSnapshot(req: Request, res: Response): Promise<void> {
+  const currentUser = req.user!;
+  const userRole: UserRole = currentUser.role;
+
+  // 1. Fetch equipment list from derived state view
+  const equipmentQuery = `
+    SELECT
+      id, asset_code, serial_no, condition, active, created_at,
+      model_id, make, model, capacity_value, type_id, type_name, capacity_unit,
+      current_location_id, current_location_name, current_location_kind,
+      last_moved_at, last_moved_by, last_moved_by_name,
+      status, current_rental_id, current_customer_id, current_customer_name,
+      current_site_name, current_rental_expected_end,
+      current_maintenance_id, current_maintenance_desc
+    FROM v_equipment_current
+    WHERE active = true
+    ORDER BY asset_code ASC
+  `;
+  const equipmentRes = await pool.query(equipmentQuery);
+
+  // 2. Fetch locations list
+  const locationsQuery = `
+    SELECT id, name, kind, party_id, created_at
+    FROM locations
+    ORDER BY id ASC
+  `;
+  const locationsRes = await pool.query(locationsQuery);
+
+  // 3. Fetch materials inventory with stock on hand calculated from append-only ledger
+  const itemsQuery = `
+    SELECT
+      i.id,
+      i.sku,
+      i.name,
+      i.category_id,
+      ic.name AS category_name,
+      i.unit_id,
+      u.code AS unit_code,
+      u.name AS unit_name,
+      i.reorder_level,
+      COALESCE(SUM(sm.qty), 0)::numeric(12,3) AS stock_on_hand,
+      (COALESCE(SUM(sm.qty), 0) <= i.reorder_level) AS is_low_stock
+    FROM items i
+    JOIN item_categories ic ON ic.id = i.category_id
+    JOIN units u ON u.id = i.unit_id
+    LEFT JOIN stock_movements sm ON sm.item_id = i.id
+    WHERE i.active = true
+    GROUP BY i.id, ic.name, u.code, u.name
+    ORDER BY i.sku ASC
+  `;
+  const itemsRes = await pool.query(itemsQuery);
+
+  // If admin, attach standard rate cards to snapshot for reference
+  let standardRates: Record<string, unknown>[] | undefined = undefined;
+  if (userRole === 'admin') {
+    const ratesRes = await pool.query(`
+      SELECT r.model_id, em.make, em.model, r.unit, r.amount, r.vat_included, r.valid_from
+      FROM rates r
+      JOIN equipment_models em ON em.id = r.model_id
+      ORDER BY r.model_id, r.unit
+    `);
+    standardRates = ratesRes.rows;
+  }
+
+  const rawSnapshot: Record<string, unknown> = {
+    role: userRole,
+    equipment: equipmentRes.rows,
+    locations: locationsRes.rows,
+    materials: itemsRes.rows,
+    ...(standardRates ? { standard_rates: standardRates } : {}),
+  };
+
+  // Crucial: sanitize financials server-side so staff responses never contain rate/price/cost fields
+  const sanitizedSnapshot = sanitizeFinancials(rawSnapshot, userRole);
+
+  // Compute deterministic ETag based on serialized data content and role
+  const contentHash = crypto
+    .createHash('sha256')
+    .update(JSON.stringify(sanitizedSnapshot))
+    .digest('hex');
+  const etag = `W/"${contentHash.substring(0, 32)}"`;
+
+  res.setHeader('ETag', etag);
+
+  // Handle conditional request (If-None-Match)
+  const clientEtag = req.headers['if-none-match'];
+  if (clientEtag && clientEtag === etag) {
+    res.status(304).end();
+    return;
+  }
+
+  const serverTime = new Date().toISOString();
+
+  res.status(200).json({
+    server_time: serverTime,
+    etag,
+    ...sanitizedSnapshot,
+  });
+}
 
 /**
  * Controller for POST /api/sync

@@ -585,3 +585,149 @@ describe('Step O2: Offline Batch Replay Suite (POST /api/sync)', () => {
     expect(countRes.rows[0].count).toBe('3');
   });
 });
+
+describe('Step O3: Role-Based Read Snapshots and ETag Caching (GET /api/sync/snapshot)', () => {
+  let adminToken: string;
+  let staffToken: string;
+
+  beforeAll(async () => {
+    // Log in admin
+    const adminRes = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'admin@spaceexspace.com', password: 'Admin#2026!Dev' });
+    adminToken = adminRes.body.token;
+
+    // Log in staff
+    const staffRes = await request(app)
+      .post('/api/auth/login')
+      .send({ email: 'staff@spaceexspace.com', password: 'Staff#2026!Dev' });
+    staffToken = staffRes.body.token;
+  });
+
+  it('rejects unauthenticated requests with 401', async () => {
+    const res = await request(app).get('/api/sync/snapshot');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns active equipment, locations, materials with stock_on_hand, server_time, and etag for staff', async () => {
+    const res = await request(app)
+      .get('/api/sync/snapshot')
+      .set('Authorization', `Bearer ${staffToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.role).toBe('staff');
+    expect(typeof res.body.server_time).toBe('string');
+    expect(res.body.etag).toBeDefined();
+    expect(res.headers['etag']).toBe(res.body.etag);
+
+    // Equipment checks
+    expect(Array.isArray(res.body.equipment)).toBe(true);
+    expect(res.body.equipment.length).toBeGreaterThan(0);
+    const firstEquip = res.body.equipment[0];
+    expect(firstEquip).toHaveProperty('id');
+    expect(firstEquip).toHaveProperty('asset_code');
+    expect(firstEquip).toHaveProperty('status');
+    expect(firstEquip).toHaveProperty('current_location_id');
+
+    // Locations checks
+    expect(Array.isArray(res.body.locations)).toBe(true);
+    expect(res.body.locations.length).toBeGreaterThan(0);
+    const firstLoc = res.body.locations[0];
+    expect(firstLoc).toHaveProperty('id');
+    expect(firstLoc).toHaveProperty('name');
+    expect(firstLoc).toHaveProperty('kind');
+
+    // Materials checks
+    expect(Array.isArray(res.body.materials)).toBe(true);
+    expect(res.body.materials.length).toBeGreaterThan(0);
+    const firstMat = res.body.materials[0];
+    expect(firstMat).toHaveProperty('id');
+    expect(firstMat).toHaveProperty('sku');
+    expect(firstMat).toHaveProperty('stock_on_hand');
+  });
+
+  it('ensures staff snapshot response contains zero financial or money fields (rates, prices, costs)', async () => {
+    const res = await request(app)
+      .get('/api/sync/snapshot')
+      .set('Authorization', `Bearer ${staffToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.standard_rates).toBeUndefined();
+
+    // Verify across full serialized response
+    const jsonStr = JSON.stringify(res.body);
+    expect(jsonStr).not.toContain('applied_rate');
+    expect(jsonStr).not.toContain('standard_rates');
+    expect(jsonStr).not.toContain('unit_cost');
+    expect(jsonStr).not.toContain('unit_price');
+    expect(jsonStr).not.toContain('vat_included');
+    expect(jsonStr).not.toContain('cost');
+  });
+
+  it('returns standard_rates in snapshot for admin users', async () => {
+    const res = await request(app)
+      .get('/api/sync/snapshot')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.role).toBe('admin');
+    expect(Array.isArray(res.body.standard_rates)).toBe(true);
+    expect(res.body.standard_rates.length).toBeGreaterThan(0);
+
+    const firstRate = res.body.standard_rates[0];
+    expect(firstRate).toHaveProperty('model_id');
+    expect(firstRate).toHaveProperty('unit');
+    expect(firstRate).toHaveProperty('amount');
+  });
+
+  it('returns 304 Not Modified when client provides matching If-None-Match header', async () => {
+    // 1. Initial GET
+    const initialRes = await request(app)
+      .get('/api/sync/snapshot')
+      .set('Authorization', `Bearer ${staffToken}`);
+
+    expect(initialRes.status).toBe(200);
+    const etag = initialRes.headers['etag'];
+    expect(etag).toBeDefined();
+
+    // 2. Conditional GET with If-None-Match
+    const conditionalRes = await request(app)
+      .get('/api/sync/snapshot')
+      .set('Authorization', `Bearer ${staffToken}`)
+      .set('If-None-Match', etag);
+
+    expect(conditionalRes.status).toBe(304);
+    expect(conditionalRes.text).toBe('');
+    expect(conditionalRes.headers['etag']).toBe(etag);
+  });
+
+  it('returns fresh 200 with new ETag when database state changes', async () => {
+    // 1. Initial snapshot
+    const res1 = await request(app)
+      .get('/api/sync/snapshot')
+      .set('Authorization', `Bearer ${staffToken}`);
+    const etag1 = res1.headers['etag'];
+
+    // 2. Mutate state: record a stock movement on the first material item
+    const targetItem = res1.body.materials[0];
+    await pool.query(
+      `INSERT INTO stock_movements (item_id, qty, type, unit_cost, moved_by, moved_at, recorded_at, note)
+       VALUES ($1, 7.500, 'receipt', 0.00, (SELECT id FROM users WHERE role = 'staff' LIMIT 1), NOW(), NOW(), 'ETag mutation test')`,
+      [targetItem.id]
+    );
+
+    // 3. Conditional GET with previous ETag
+    const res2 = await request(app)
+      .get('/api/sync/snapshot')
+      .set('Authorization', `Bearer ${staffToken}`)
+      .set('If-None-Match', etag1);
+
+    expect(res2.status).toBe(200);
+    const etag2 = res2.headers['etag'];
+    expect(etag2).toBeDefined();
+    expect(etag2).not.toBe(etag1);
+
+    // Clean up test movement
+    await pool.query(`DELETE FROM stock_movements WHERE note = 'ETag mutation test'`);
+  });
+});
