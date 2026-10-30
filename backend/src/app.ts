@@ -10,8 +10,20 @@ import { equipmentRouter } from './routes/equipmentRoutes.js';
 import rentalsRouter from './routes/rentalsRoutes.js';
 import materialsRouter from './routes/materialsRoutes.js';
 import invoicesRouter from './routes/invoicesRoutes.js';
+import { syncRouter } from './routes/syncRoutes.js';
+import { labelsRouter } from './routes/labelsRoutes.js';
 
 export const app = express();
+
+/**
+ * Trust immediate reverse proxy (Nginx, Caddy, Cloudflare, AWS ALB).
+ * WHY: When hosted behind a reverse proxy or load balancer in production,
+ * Express must trust the first upstream proxy hop (trust proxy: 1) so that
+ * req.ip and req.ips accurately resolve the real client IP from X-Forwarded-For,
+ * ensuring login rate limiters and audit loggers throttle individual clients rather
+ * than collapsing all traffic into the proxy's IP.
+ */
+app.set('trust proxy', 1);
 
 // Security headers
 app.use(helmet());
@@ -64,6 +76,9 @@ app.use('/api/rates', ratesRouter);
 // Equipment & QR tracking routes
 app.use('/api/equipment', equipmentRouter);
 
+// Equipment QR printable labels routes
+app.use('/api/labels', labelsRouter);
+
 // Rentals management routes
 app.use('/api/rentals', rentalsRouter);
 
@@ -72,6 +87,9 @@ app.use('/api/materials', materialsRouter);
 
 // Stored invoices & supplier purchasing routes
 app.use('/api/invoices', invoicesRouter);
+
+// Offline sync replay routes
+app.use('/api/sync', syncRouter);
 
 // 404 handler for unknown routes
 app.use((_req, res) => {

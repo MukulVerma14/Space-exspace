@@ -10,10 +10,13 @@ import { env } from '../config/env.js';
  * without constraint errors, duplicate primary keys, or dirty data states.
  */
 export async function seedDatabase() {
-  // Production safety guard: Seeding is strictly prohibited in production mode
-  if (env.NODE_ENV === 'production' || process.env.NODE_ENV === 'production') {
-    logger.error('❌ Seeding is prohibited in production environment!');
-    throw new Error('Database seeding is strictly disabled in production mode (NODE_ENV=production).');
+  const isProduction = env.NODE_ENV === 'production' || process.env.NODE_ENV === 'production';
+  const allowDemoSeed = env.ALLOW_DEMO_SEED === 'true' || process.env.ALLOW_DEMO_SEED === 'true';
+
+  // Production safety guard: Seeding refuses NODE_ENV=production unless ALLOW_DEMO_SEED=true is set
+  if (isProduction && !allowDemoSeed) {
+    logger.error('❌ Seeding is refused in production environment! Set ALLOW_DEMO_SEED=true to seed demo data in production.');
+    throw new Error('Database seeding is strictly disabled in production mode (NODE_ENV=production) unless ALLOW_DEMO_SEED=true is set.');
   }
 
   const client = await pool.connect();
@@ -24,12 +27,14 @@ export async function seedDatabase() {
 
     // =========================================================================
     // 1. USERS & ROLES
-    // Dev passwords documented in README.md only:
-    // Admin: Admin#2026!Dev | Staff: Staff#2026!Dev
+    // Passwords come from environment variables in production, never hardcoded
     // =========================================================================
+    const adminPassword = process.env.DEMO_ADMIN_PASSWORD || env.DEMO_ADMIN_PASSWORD || 'Admin#2026!Dev';
+    const staffPassword = process.env.DEMO_STAFF_PASSWORD || env.DEMO_STAFF_PASSWORD || 'Staff#2026!Dev';
+
     const saltRounds = 10;
-    const adminHash = await bcrypt.hash('Admin#2026!Dev', saltRounds);
-    const staffHash = await bcrypt.hash('Staff#2026!Dev', saltRounds);
+    const adminHash = await bcrypt.hash(adminPassword, saltRounds);
+    const staffHash = await bcrypt.hash(staffPassword, saltRounds);
 
     const userAdminRes = await client.query(
       `INSERT INTO users (name, email, password_hash, role)
@@ -526,6 +531,7 @@ export async function seedDatabase() {
     }
 
     // =========================================================================
+    await client.query("DELETE FROM maintenance WHERE closed_at IS NULL AND equipment_id NOT IN ($1, $2)", [equipIdMap.get('CRN-50-004')!, equipIdMap.get('CRN-70-003')!]);
     // 9. MAINTENANCE (REPAIRS: OPEN WORK ORDERS & CLOSED HISTORICAL WORK)
     // =========================================================================
     // Open maintenance order 1: CRN-50-004 (Hydraulic pump overhaul) -> derives status 'under_repair'

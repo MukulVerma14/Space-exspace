@@ -578,3 +578,792 @@ This document records every step of building the SPACE EXSPACE equipment and mat
        "message": "Stock cannot become negative"
      }
      ```
+
+---
+
+## Step O1: Idempotent Events, Client-Generated UUIDs, and Occurred-Time Ordering
+
+### What we built:
+- **Offline Events Ledger Migration (`backend/migrations/1730000000001_offline_sync_events.sql`)**:
+  - `sync_events` table with client-generated UUID primary key (`client_event_id`), `user_id`, `type`, `payload` (JSONB), `status` (`accepted`, `rejected`, `duplicate`), `result` (JSONB), `occurred_at`, and `recorded_at`.
+  - Added `recorded_at` column (`TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP`) to both `location_log` and `stock_movements`.
+  - Updated derived state view `v_equipment_current` to order location movements strictly by physical occurred time (`moved_at DESC, recorded_at DESC, id DESC`), ensuring a stale device syncing an old movement cannot overwrite a newer movement.
+- **Sync Event Service (`backend/src/services/syncEventService.ts`)**:
+  - `findSyncEventById`: Queries `sync_events` by `client_event_id` to detect previously processed events.
+  - `persistSyncEvent`: Atomically writes the processed event and its outcome into `sync_events`.
+- **Automated Verification Suite (`backend/src/__tests__/offline_events.test.ts`)**:
+  - Integration tests verifying table schema, UUID primary key, status check constraints, presence of `recorded_at` in audit ledgers, event replay idempotency, and proof that a stale device syncing an old move at 08:00 AM does not displace a newer move at 10:00 AM in `v_equipment_current`.
+- **Architectural Decision Record**: Documented in `docs/decisions/008-client-generated-uuids-and-offline-event-ordering.md`.
+
+### Why it exists:
+- **Client Requirement**: Mobile access for yard staff to scan a QR code and update location/status, functioning even in remote yards or basement workshops with intermittent or zero cellular connectivity (**CONFIRMED**).
+- **Core Reliability**: Field staff will send actions when disconnected; when reconnected, network retries and duplicate transmissions must not create duplicate equipment movements or duplicate stock deductions (**CONFIRMED**).
+- **Audit & Timeline Integrity**: Audit ledgers must track both when an event physically happened in the yard (`moved_at`) and when the server received and recorded it (`recorded_at`) (**CONFIRMED**).
+
+### Why this way:
+- **Client-Generated UUIDs & Occurred-Time Ordering instead of Server Timestamps**:
+  - *Alternative 1 Rejected (Server-Assigned Sequential IDs)*: If the server generates IDs, the mobile device cannot tag its retried HTTP requests with an immutable identifier before sending them. A dropped TCP connection midway through an HTTP response would cause the phone to retry, creating two identical moves or double-deducting stock.
+  - *Alternative 2 Rejected (Ordering by Server Arrival Time `recorded_at DESC` or `id DESC`)*: In field operations across Dammam and Jubail, workers go offline for hours. If Worker A relocates a crane at 10:00 AM while online, and Worker B moved it at 08:00 AM while offline and syncs at 11:00 AM, server-arrival ordering would overwrite Worker A's newer move with Worker B's older move.
+  - *Alternative 3 Rejected (Natural Composite Keys e.g. `hash(user_id, equipment_id, timestamp)`)*: Easily collides if a worker moves multiple items within the same second or if clocks have coarse granularity. UUID v4 provides 122 bits of cryptographic randomness generated entirely on the device.
+
+### How it works:
+1. **Offline Capture**:
+   - The field technician's device detects an offline state and saves the action locally.
+   - The device assigns a fresh UUID v4 as `client_event_id` and records the current local device time as `occurred_at`.
+2. **Sync / Replay**:
+   - When connection is restored, the device posts the event with its `client_event_id`.
+   - The server inspects `sync_events WHERE client_event_id = $1`.
+   - If found, the server immediately returns the previously persisted `status` and `result`, performing zero writes to `location_log` or `stock_movements`.
+   - If not found, the server processes the event, writes `location_log` with `moved_at = occurred_at` and `recorded_at = NOW()`, and records the result in `sync_events`.
+3. **Timeline Resolution in `v_equipment_current`**:
+   - The view executes `DISTINCT ON (equipment_id) ... ORDER BY ll.equipment_id, ll.moved_at DESC, ll.recorded_at DESC, ll.id DESC`.
+   - Physical reality is preserved: the movement with the latest `moved_at` wins, regardless of when it arrived at the server.
+
+### Concepts used:
+- **Idempotency**: A property of an operation whereby it can be applied multiple times without changing the result beyond the initial application.
+- **Client-generated UUID**: A unique identifier generated on the client prior to network transmission, allowing retries to reference the identical logical intent.
+- **Bi-temporal data modeling**: Tracking two separate time dimensions for an event: business time (when it occurred in the real world: `moved_at`) and system time (when the database recorded it: `recorded_at`).
+- **Last-Write-Wins (LWW) by physical occurrence**: Resolving conflicting state updates by selecting the event with the latest physical timestamp rather than server arrival time.
+- **Idempotent replay ledger**: A database table storing the execution outcomes of previous requests to short-circuit repeated attempts.
+
+### Risks and assumptions:
+- **Assumption**: Device clocks on yard workers' mobile phones are reasonably accurate (synchronized via NTP or cellular networks). Step O2 introduces a 5-minute future clock skew safeguard.
+- **Risk**: If two workers physically relocate the same machine while both are offline in different yards, the one with the later physical timestamp wins in `v_equipment_current`. This conflict resolution policy will be formally addressed in ADR 009 in Step O2.
+
+### 30-second explanation:
+> *"When a yard worker moves a crane while their phone has no signal, their phone assigns a unique fingerprint (a UUID) and marks the exact time the move happened. When they get back into Wi-Fi range and upload their work, the server checks if that fingerprint was already processed—so bad cellular connections never accidentally move a crane twice. And even if an old move from two hours ago uploads late, the database knows it's an old move and won't let it overwrite a newer move made by someone else."*
+
+### Likely questions:
+1. **"Why does the mobile app generate the event UUID instead of letting the PostgreSQL database generate it with `gen_random_uuid()`?"**
+   *Answer*: If the server generates the ID, the client has no way to prove that a re-sent network request is a retry of the same action. If a mobile network connection drops right after the server processes an insert but before the phone receives the HTTP 200 response, the phone must retry. If the phone generates the UUID before transmitting, both attempts send the exact same UUID. The server recognizes the UUID on the second attempt, skips inserting, and returns the cached success response.
+2. **"Why did we add `recorded_at` to `location_log` when we already had `moved_at`?"**
+   *Answer*: This is the bi-temporal modeling pattern. `moved_at` represents real-world physical time—when the crane was unhooked and driven to the new yard. `recorded_at` represents database transaction time—when the central server actually found out about it. Having both is essential for operational audits: we can see that a crane was moved at 8:00 AM in the yard, but only synced to the office at 11:30 AM when the driver reached Wi-Fi.
+3. **"What stops a phone with an incorrectly set future date (e.g. year 2030) from permanently locking an equipment's location in `v_equipment_current`?"**
+   *Answer*: Because `v_equipment_current` orders by `moved_at DESC`, an event with a malicious or broken future timestamp would dominate the view. In Step O2, the sync endpoint enforces a clock-skew validation rule: any event with `occurred_at` more than 5 minutes in the future relative to server time is strictly rejected.
+
+### How to verify:
+1. Run all backend test suites:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 7 test suites pass cleanly (**59 tests passed**), including all 4 tests in `offline_events.test.ts`.
+2. Verify TypeScript type checking:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: `tsc --noEmit` exits with 0 errors.
+
+
+---
+
+## Step O2: Batch Sync Endpoint, Precondition Guards, and Conflict Policy
+
+### What we built:
+- **Batch Sync Controller & Routes (`backend/src/controllers/syncController.ts`, `backend/src/routes/syncRoutes.ts`)**:
+  - `POST /api/sync`: Accepts a batch of up to 50 offline events.
+  - Sorts events strictly by physical timestamp (`occurred_at ASC`) before processing.
+  - Processes each event inside an isolated database transaction (`BEGIN ... COMMIT / ROLLBACK`), ensuring that a failure in one event never rolls back other valid events.
+  - Evaluates domain preconditions at sync time:
+    - `equipment.move`: Validates asset and destination location exist; records move with `moved_at = occurred_at`.
+    - `equipment.return`: Verifies the machine is actively rented; updates `rental_items.returned_at = occurred_at`, updates condition, records return location, and updates rental status.
+    - `equipment.repair`: Checks that machine is not currently rented and not already under repair; creates `maintenance` record and workshop relocation.
+    - `material.goods_received`: Replays quantity-only receipt into the single-entry append-only ledger with zero unit cost.
+    - `material.issue`: Re-checks that stock on hand will not drop below zero before inserting negative delta.
+  - Enforces authorization invariants: Event `user_id` must equal authenticated token `req.user.id` (rejects with `USER_MISMATCH`).
+  - Enforces clock skew limit: Rejects any event with `occurred_at > NOW() + 5 minutes` (rejects with `CLOCK_SKEW_EXCEEDED`).
+  - Idempotency check: If `client_event_id` was already processed, returns cached status `duplicate` with original result payload.
+  - Non-dropping audit contract: Rejections are immediately persisted in `sync_events` with `status = 'rejected'` and descriptive error metadata.
+  - Data protection: Passes all batch responses through `sanitizeFinancials(results, userRole)` so staff never receive commercial rates or costs.
+- **Architectural Decision Record**: Documented in `docs/decisions/009-offline-conflict-policy.md`.
+- **Automated Verification Suite (`backend/src/__tests__/offline_events.test.ts`)**: 10 comprehensive integration tests verifying unauthenticated 401, batch limits (>50 rejected), out-of-order replay, idempotent duplicate resends, user token mismatch rejection, clock skew rejection, unrented return rejection, negative stock rejection, staff rate stripping, and mixed success/failure batches.
+
+### Why it exists:
+- **Client Requirement**: Mobile access for yard staff to scan a QR code and update location/status, functioning even in remote yards or basement workshops with intermittent or zero cellular connectivity (**CONFIRMED**).
+- **Client Requirement**: Two distinct roles (admin and staff) where staff scan QR codes and update status by physical action, without access to rates or prices (**CONFIRMED**).
+- **Core Distributed Reliability**: Mobile devices can collect dozens of actions across an 8-hour shift. When re-connected, the server must process the batch deterministically, preserve audit history, and prevent invalid business transitions.
+
+### Why this way:
+- **Per-Event Isolated Transactions instead of Single Batch Transaction**:
+  - *Alternative 1 Rejected (All-or-Nothing Batch Transaction)*: If a worker performs 25 equipment relocations and 1 invalid return, aborting all 25 valid relocations forces workers to re-scan equipment across the entire yard. Isolated per-event transactions maximize operational resilience in the field.
+- **Precondition Verification at Sync Time instead of Blind Upsert**:
+  - *Alternative 2 Rejected (Blindly Overwriting State)*: If another user already returned an item or issued all remaining cable while a device was offline, blindly applying the offline action would violate database constraints or corrupt inventory ledgers into negative numbers.
+- **Explicit Rejection Audit instead of Silent Dropping**:
+  - *Alternative 3 Rejected (Silent Drop / Ignore)*: If an event is rejected silently, workers have no visibility into why their screen doesn't match the physical yard. Persisting the rejection in `sync_events` guarantees full auditability for administrators.
+
+### How it works:
+1. Mobile device sends `POST /api/sync` with `{ events: [...] }` and Bearer JWT token.
+2. The endpoint verifies authentication, checks that `events.length <= 50`, and validates individual schemas.
+3. The server sorts events by `occurred_at ASC`.
+4. For each event:
+   - Validates that `event.user_id === req.user.id` and `occurred_at <= NOW() + 5m`.
+   - Starts transaction `BEGIN`.
+   - Queries `sync_events` for existing `client_event_id`. If found, rolls back and marks as `duplicate`.
+   - Validates business preconditions (active rental check, non-negative stock check).
+   - Executes the domain action (writing `location_log` or `stock_movements` with `moved_at = occurred_at`).
+   - Persists the success record into `sync_events` and commits `COMMIT`.
+   - If an error occurs, rolls back `ROLLBACK`, persists the rejection audit row into `sync_events`, and records `status: 'rejected'`.
+5. The endpoint sanitizes financial fields for staff users and returns HTTP 200 with per-event receipts.
+
+### Concepts used:
+- **Event Sourcing / CQRS Inspiration**: Treating offline actions as a stream of immutable historical domain events applied in business occurrence order.
+- **Fail-Partial Architecture**: Allowing valid batch operations to succeed while cleanly capturing and reporting individual failures.
+- **Clock Skew Tolerance**: Accepting reasonable device clock drift (up to 5 minutes into the future) while rejecting egregiously erroneous timestamps.
+- **Server-Side Sanitization**: Stripping confidential commercial rates before sending responses to staff clients.
+
+### Risks and assumptions:
+- **Assumption**: Network connection is restored at least once per work shift to prevent unbounded event backlogs.
+- **Risk**: If two staff members attempt to issue the last remaining drum of hydraulic oil while both are offline, the first one to sync will succeed; the second will be rejected with `INSUFFICIENT_STOCK`. The field team must perform physical stock reconciliation for rejected movements.
+
+### 30-second explanation:
+> *"We built the batch sync endpoint that receives up to 50 offline worker actions at once. The server sorts them so they execute in the exact order they happened in the yard, each inside its own safety box. If an action fails—like trying to return equipment that was already returned or issuing material that ran out—the server doesn't crash or throw away the rest of the worker's shift. It executes every valid move, records why the invalid one failed, and never reveals confidential commercial prices to staff."*
+
+### Likely questions:
+1. **"What happens if two yard workers move the same crane to different yards while both are offline?"**
+   *Answer*: Both movements are saved permanently in `location_log` as an audit trail. However, `v_equipment_current` orders movements strictly by `moved_at DESC` (when the action physically occurred). Whichever worker physically moved the crane later in real time will be reflected as the machine's current location once synced.
+2. **"Why does the server reject events with an `occurred_at` timestamp more than 5 minutes in the future?"**
+   *Answer*: Because `v_equipment_current` chooses the latest location based on `moved_at DESC`, a phone with a faulty clock set to the year 2030 would insert a record that permanently locks the crane's location for the next four years. The 5-minute future skew limit prevents clock drifts or tampering from poisoning the derived view.
+3. **"Why does `POST /api/sync` run each event in its own transaction instead of wrapping all 50 events in one big transaction?"**
+   *Answer*: If a technician scans 40 pieces of equipment during an 8-hour shift and makes a mistake on the 41st, wrapping the entire batch in one transaction would roll back all 40 successful scans. Isolated per-event transactions guarantee that valid physical work is never discarded due to an isolated precondition error.
+
+### How to verify:
+1. Run all backend test suites:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 7 test suites pass cleanly (**69 tests passed**, including all 14 tests in `offline_events.test.ts`).
+2. Run TypeScript compiler checks:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: `tsc --noEmit` exits with 0 errors.
+
+---
+
+## Step O3: Role-Based Read Snapshots and ETag Caching
+
+### What we built:
+- **Read Snapshot Endpoint (`GET /api/sync/snapshot`)**:
+  - Implemented `getSyncSnapshot` in `backend/src/controllers/syncController.ts` and mounted in `backend/src/routes/syncRoutes.ts`.
+  - Accessible to authenticated Staff and Admin roles.
+  - Returns unified operational data needed for offline field operation:
+    - `equipment`: Derived fleet status and current location directly from `v_equipment_current`.
+    - `locations`: Active operational sites (yards, client sites, workshops).
+    - `materials`: Items catalog with real-time `stock_on_hand` calculated from the append-only `stock_movements` ledger.
+    - `server_time`: UTC ISO 8601 server timestamp allowing mobile devices to calculate and compensate for local clock drift.
+    - `etag`: Deterministic SHA-256 content hash of the role-sanitized data payload.
+- **HTTP 304 Not Modified Caching**:
+  - Evaluates standard `If-None-Match` HTTP request header against the calculated snapshot ETag.
+  - When operational data has not changed, immediately returns HTTP `304 Not Modified` with zero response body, minimizing cellular bandwidth consumption and mobile battery usage.
+  - Emits fresh HTTP 200 responses with an updated ETag as soon as equipment relocates, status transitions, or inventory movements occur.
+- **Strict Role-Based Data Minimization (Defense-in-Depth)**:
+  - Enforces `sanitizeFinancials(rawSnapshot, userRole)` on all snapshot responses.
+  - Staff responses physically strip all commercial rate cards, rental rates, unit costs, invoice prices, and repair costs (`applied_rate`, `unit_cost`, `unit_price`, `cost`, `standard_rates`, `vat_included`).
+  - Admin responses include `standard_rates` for reference during quotations and rate management.
+- **Architectural Decision Record**: Documented in `docs/decisions/010-role-based-read-snapshots-and-etag-caching.md`.
+- **Automated Verification Suite (`backend/src/__tests__/offline_events.test.ts`)**:
+  - 6 new automated integration tests verifying:
+    1. Unauthenticated requests return HTTP 401.
+    2. Staff snapshot includes active equipment, locations, materials with current stock, server timestamp, and ETag header.
+    3. Staff snapshot contains zero financial or rate fields anywhere in the serialized JSON.
+    4. Admin snapshot contains `standard_rates` table.
+    5. Conditional GET with matching `If-None-Match` header returns HTTP 304 with empty body.
+    6. Database state mutations (inventory stock movements) cause the server to emit a fresh HTTP 200 with an updated ETag.
+
+### Why it exists:
+- **Client Requirement**: Mobile access for yard staff to scan a QR code and update location/status, functioning even in remote yards or basement workshops with intermittent or zero cellular connectivity (**CONFIRMED**).
+- **Client Requirement**: Two distinct roles (admin and staff) where staff scan QR codes and update status by physical action, without access to rates or prices (**CONFIRMED**).
+- **Core Mobile Offline Performance**: Before heading into dead zones, field devices must download an authoritative, lightweight baseline of available machines and consumable stock. Re-fetching full datasets every few minutes drains mobile battery and cellular data quotas; conditional ETag caching ensures instant validation with near-zero data transfer.
+
+### Why this way:
+- **Consolidated Snapshot instead of Multiple REST Queries**:
+  - *Alternative 1 Rejected (Separate Endpoints for /equipment, /locations, /materials)*: Making multiple HTTP roundtrips over spotty 3G/LTE connections increases connection latency, risks partial downloads, and complicates cache invalidation across interdependent entities. A single consolidated snapshot provides atomic state synchronization.
+- **Server-Side Financial Stripping instead of Client-Side Masking**:
+  - *Alternative 2 Rejected (Hiding Rates via Frontend CSS/UI)*: Storing sensitive commercial hire rates or vendor purchase prices on staff mobile devices creates massive security exposure. Server-side stripping guarantees that even if a technician's device is decompiled or inspected offline, commercial rate cards are not present.
+- **Deterministic Content Hash ETag instead of Server Modification Timestamps**:
+  - *Alternative 3 Rejected (Last-Modified Header)*: PostgreSQL rows across multiple tables (`equipment`, `location_log`, `rentals`, `items`, `stock_movements`) have distinct timestamps. A SHA-256 hash of the sanitized JSON structure produces an unambiguous, collision-resistant ETag that changes only when meaningful data changes.
+
+### How it works:
+1. Mobile device connects and sends `GET /api/sync/snapshot` with Bearer JWT token.
+2. The server verifies caller role (`staff` or `admin`).
+3. The server concurrently executes:
+   - Query to `v_equipment_current` for active fleet status and locations.
+   - Query to `locations` for active operational sites.
+   - Query to `items` joined with `stock_movements` to aggregate `stock_on_hand`.
+   - If admin, queries `rates` table for standard rate cards.
+4. The server passes the aggregated object through `sanitizeFinancials()`.
+5. The server computes `sha256(JSON.stringify(sanitizedSnapshot)).substring(0, 32)` and formats it as `W/"<hash>"`.
+6. If the client sent `If-None-Match` matching this hash:
+   - Server returns HTTP 304 Not Modified immediately.
+7. Otherwise:
+   - Server returns HTTP 200 with `server_time`, `etag`, and the sanitized snapshot payload.
+
+### Concepts used:
+- **HTTP Conditional Requests & Cache Validation**: Standard RFC 7232 ETag and `If-None-Match` protocol for efficient bandwidth conservation.
+- **Server-Side Data Minimization**: Enforcing security boundaries at the API layer so sensitive commercial numbers never travel to unauthorized tiers.
+- **Authoritative Clock Synchronization**: Providing server UTC time in read snapshots so clients can calculate skew deltas before logging field actions.
+- **Single-Source Aggregated Derived State**: Sourcing equipment locations from `v_equipment_current` and inventory balances from `stock_movements` ledgers rather than separate caching tables.
+
+### Risks and assumptions:
+- **Assumption**: Field technicians perform initial login and initial snapshot synchronization while they have internet access before leaving the office or yard dispatch area.
+- **Scale Consideration**: For thousands of assets, downloading the snapshot payload takes <150KB of JSON. At enterprise scale (tens of thousands of assets), snapshots can be scoped by assigned geographic yard or division.
+
+### 30-second explanation:
+> *"We built the read snapshot system that field phones use to download their offline toolkit. When a yard worker opens the app, it pulls the current status and location of all equipment, yards, and available materials without downloading a single commercial price or rental rate. If the worker's phone already has the latest data, the server answers with a 304 Not Modified code that transfers zero bytes, preserving battery and mobile data."*
+
+### Likely questions:
+1. **"Can a staff member inspect the local storage or network packets on their phone to see client rental rates or equipment prices?"**
+   *Answer*: No. The server applies `sanitizeFinancials` directly to the snapshot data before serializing it or sending it over HTTP. Staff snapshots physically omit all rate, price, and cost fields.
+2. **"Why does the snapshot include an ETag and accept `If-None-Match`?"**
+   *Answer*: Technicians frequently enter and leave cellular coverage zones. If the mobile app re-downloaded the entire equipment list and inventory catalog every time cellular signal returned, it would waste bandwidth and drain battery. By sending `If-None-Match: <etag>`, the server checks in milliseconds if anything changed; if not, it returns HTTP 304 with no body.
+3. **"Why is `server_time` included in the snapshot response?"**
+   *Answer*: Mobile phone clocks often drift by minutes or hours due to manual adjustments or roaming between cell networks. When the app receives `server_time`, it calculates the difference between its local clock and the server clock, allowing it to record field actions with accurate physical occurrence times and avoid clock-skew rejections.
+
+### How to verify:
+1. Run all backend automated test suites:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 7 test suites pass cleanly (**75 tests passed**, including all 20 tests in `offline_events.test.ts`).
+2. Verify TypeScript type checking:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: `tsc --noEmit` exits with 0 errors.
+3. Verify ETag caching via curl:
+   ```bash
+   # 1. Fetch initial snapshot
+   curl -i -H "Authorization: Bearer <STAFF_JWT>" http://localhost:3000/api/sync/snapshot
+   # Note ETag header value: W/"..."
+
+   # 2. Re-fetch with If-None-Match
+   curl -i -H "Authorization: Bearer <STAFF_JWT>" -H 'If-None-Match: W/"..."' http://localhost:3000/api/sync/snapshot
+   # Expected: HTTP/1.1 304 Not Modified
+   ```
+
+---
+
+## Step O4: Comprehensive Offline Test Suite, Multi-Device Concurrency, and DevTools Demo Guide
+
+### What we built:
+- **Comprehensive Integration Test Suite (`backend/src/__tests__/offline_events.test.ts`)**:
+  - Expanded the offline events test suite to **24 thorough integration tests** covering all critical field failure modes:
+    1. **Stale Device Syncing an Old Move**: Worker A moves a crane offline at 08:00 AM; Worker B moves the crane online at 09:30 AM to a workshop. Worker B's move syncs first; Worker A's move syncs later at 11:00 AM. The test proves Worker A's move is accepted into `location_log` for auditability, but `v_equipment_current` strictly preserves the Workshop location because 09:30 AM > 08:00 AM.
+    2. **Out-of-Order Interleaved Batch Replay**: An offline batch containing valid receipts, valid issues, and an overdraw issue sent intentionally in non-chronological order. Proves the server sorts by `occurred_at ASC`, executes valid transactions, rejects the overdraw with `INSUFFICIENT_STOCK`, and updates the inventory ledger accurately without dropping events.
+    3. **Batch Idempotency Across Multiple Replays**: A multi-event batch re-executed identically returns `status: 'duplicate'` with matching stored results and zero duplicate rows written to `location_log` or `stock_movements`.
+    4. **Domain Precondition Rejection (Double Repair)**: Rejects sending an asset to repair if it is already under an active maintenance work order (`ALREADY_UNDER_REPAIR`) and records the failure in `sync_events`.
+- **End-to-End Offline Demonstration Guide (`docs/DEMO.md`)**:
+  - Comprehensive guide documenting how to simulate offline field conditions using Browser DevTools (**Network > Throttling > Offline**).
+  - Detailed 7-step walkthrough covering initial login, snapshot caching, offline queuing, auto-reconnection flushing, idempotency proofs, multi-device conflict resolution, and HTTP 304 ETag caching.
+  - **Explicit Invariant Documented**: Highlights that the very first login strictly requires internet connectivity for server-side credential verification and JWT issuance before heading into offline coverage zones.
+- **Architectural Decision Record**: Documented in `docs/decisions/011-offline-client-lifecycle-and-first-login-dependency.md`.
+
+### Why it exists:
+- **Client Requirement**: Mobile access for yard staff to scan a QR code and update location/status, functioning even in remote yards or basement workshops with intermittent or zero cellular connectivity (**CONFIRMED**).
+- **Client Requirement**: High operational reliability where network drops and device clock differences never corrupt inventory ledgers or misplace heavy fleet assets (**CONFIRMED**).
+- **Demonstrability & Verification**: Product owners, stakeholders, and developers need an authoritative, repeatable procedure to test offline workflows on local machines without driving to remote dead zones.
+
+### Why this way:
+- **Automated Integration Testing over Unit Mocking**:
+  - *Alternative 1 Rejected (Mocking DB queries in unit tests)*: Multi-device concurrency, timestamp ordering in PostgreSQL views, and transaction rollbacks cannot be reliably verified with in-memory mocks. Testing against the real PostgreSQL database engine proves true runtime correctness.
+- **Browser DevTools Emulation over Physical Airplane Mode**:
+  - *Alternative 2 Rejected (Requiring physical Wi-Fi disconnections)*: Browser DevTools network throttling provides a standardized, zero-hardware environment for developers and testers to observe network error handling, IndexedDB queuing, and batch flushing.
+
+### How it works:
+1. Technicians authenticate online once to receive their JWT token and cache the initial operational snapshot (`GET /api/sync/snapshot`).
+2. Technicians enter offline areas. Physical scans and issues are recorded locally in IndexedDB with client-generated UUIDs and timestamps.
+3. Upon reconnecting, the client flushes queued events to `POST /api/sync`.
+4. The server validates and processes events in chronological order, isolating each event in a distinct transaction.
+5. If another technician moved the asset at a later physical time, `v_equipment_current` retains the latest location while storing both movements in the audit log.
+6. The client receives explicit per-event statuses (`accepted`, `duplicate`, `rejected`) and updates its local UI accordingly.
+
+### Concepts used:
+- **Bi-Temporal Concurrency Ordering**: Using physical occurrence time (`moved_at`) for current operational state while recording system arrival time (`recorded_at`) for audit compliance.
+- **Fail-Partial Transaction Isolation**: Processing batch items in independent transactions so valid field entries are never rolled back by an adjacent precondition failure.
+- **Browser Network Throttling Emulation**: Leveraging Chromium/WebKit DevTools network stack interception to simulate field cellular dead zones.
+- **Zero-Trust Client Authentication**: Enforcing server-side credential validation and cryptographic token issuance rather than storing password hashes on mobile clients.
+
+### Risks and assumptions:
+- **Assumption**: Field workers authenticate and synchronize their initial snapshot before departing dispatch offices or areas with cell coverage (**CONFIRMED**).
+- **Risk**: If two technicians offline simultaneously attempt to issue the very last unit of a spare part, the first device to regain cellular signal and sync will succeed; the second will receive `INSUFFICIENT_STOCK` and require physical yard reconciliation.
+
+### 30-second explanation:
+> *"We built the comprehensive automated test suite and the developer demo guide for offline field operations. Our tests prove that if a worker's phone stays offline for three hours and syncs an old crane move after another worker already moved it online, the server records the history but never lets the stale phone overwrite the crane's true location. The demo guide shows anyone how to simulate being completely offline using browser DevTools with zero setup, while explaining why the very first login must always happen online."*
+
+### Likely questions:
+1. **"Can a technician log into the mobile app for the first time while in the middle of a desert job site with no cell reception?"**
+   *Answer*: No. The first-ever login requires internet connectivity. Password verification (bcrypt hashing) and cryptographic JWT signing occur exclusively on the server. Technicians log in at the yard office before heading into dead zones; once logged in, their session and operational snapshot remain valid offline.
+2. **"How does DevTools offline mode help verify our sync logic?"**
+   *Answer*: By switching the Network tab to 'Offline', the browser cuts all outbound HTTP requests. You can perform equipment moves and material issues in the app, observe that they are saved in local IndexedDB outbox queues without crashing, and then switch back to 'No throttling' to watch the app immediately flush the batch to `/api/sync` and receive per-event receipts.
+3. **"What happens if an offline technician resends a batch three times because the connection was shaky?"**
+   *Answer*: The server detects the unique `client_event_id` UUID on each event. The first request accepts the moves; the second and third requests return status `duplicate` with the exact same stored result and write zero additional rows to the database.
+
+### How to verify:
+1. Run the complete automated offline test suite:
+   ```bash
+   npm --workspace=backend run test -- src/__tests__/offline_events.test.ts
+   ```
+   *Expected Result*: All 24 tests pass cleanly.
+2. Run all project test suites:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 7 test suites pass cleanly (**79 tests passed**).
+3. Verify TypeScript type checking:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: `tsc --noEmit` exits with 0 errors.
+4. Follow the manual DevTools demo procedure in `docs/DEMO.md`.
+
+---
+
+## Step O4 Hardening: Unpriced Stock Accounting, Rental Multi-Item Closure, Private Cache Control, and Row-Locked Concurrency
+
+### What we built:
+1. **Unpriced Stock Receipts (`unit_cost IS NULL`) & Valuation Integrity**:
+   - Updated offline `material.goods_received` and unpriced movements to insert `unit_cost = NULL` (instead of `0.00`).
+   - Created database migration `backend/migrations/1730000000002_allow_null_unit_cost.sql` to drop `NOT NULL` and default `0.00` constraints on `stock_movements.unit_cost`.
+   - Updated `GET /api/materials/:id/price-history` to compute inventory valuation (`total_valuation`, `average_cost`, `priced_qty`, `priced_receipts_count`) while strictly excluding `unit_cost IS NULL` rows. This ensures field deliveries pending supplier invoices never artificially dilute inventory valuation or weighted average costs.
+2. **Multi-Item Rental Return Verification**:
+   - Verified and proved that returning an equipment asset on a multi-item rental agreement (`equipment.return`) only closes the rental agreement (updating `rentals.status = 'returned'`) when **ALL** rental line items have been returned (`COUNT(*) WHERE returned_at IS NULL = 0`).
+   - Partial returns return the asset to available yard inventory while keeping the rental contract active.
+3. **HTTP Cache-Control Private Header**:
+   - Added `Cache-Control: private` header to `GET /api/sync/snapshot` alongside deterministic ETags. Ensures downstream shared proxies/CDNs never cache role-specific data.
+4. **Row-Locked Concurrency Trigger Enforcement**:
+   - Created database migration `backend/migrations/1730000000003_stock_trigger_concurrency_lock.sql` updating `check_stock_movement_non_negative()`.
+   - Added explicit parent item row lock (`PERFORM id FROM items WHERE id = NEW.item_id FOR UPDATE`) inside the trigger before calculating `SUM(qty)`.
+   - Under PostgreSQL's `READ COMMITTED` isolation, two parallel sync requests issuing the last remaining stock unit are serialized: the second transaction waits for the first to commit, re-evaluates available stock as 0, and is blocked by the trigger raising `INSUFFICIENT_STOCK`.
+5. **Complete API Reference (`docs/API.md`)**:
+   - Generated full documentation covering all 25 endpoints (including `/api/sync` and `/api/sync/snapshot`), role-based request/response JSON for Admin and Staff, and client clock drift correction guides.
+6. **Automated Integration Tests**:
+   - Added 4 comprehensive tests to `backend/src/__tests__/offline_events.test.ts` (bringing the test suite to **83 passing tests** across 7 test files).
+
+### Why it exists:
+- **Commercial Valuation Accuracy**: Field yard workers logging receipts of steel plates or lubricants have no legal knowledge of negotiated commercial prices. Recording `0.00` as cost would misrepresent balance sheets by falsely claiming free inventory.
+- **Contractual Integrity**: Rental contracts frequently bundle multiple machines (e.g. 2 cranes and 1 generator). If returning the first crane prematurely marked the rental as `'returned'`, billing would prematurely terminate while the customer still held the remaining machines on site.
+- **Data Privacy & Caching Compliance**: Shared edge proxies must never serve an Admin snapshot (with rate cards) to a Staff worker, or vice-versa. `Cache-Control: private` guarantees caching is restricted to the caller's private browser/device cache.
+- **Zero Race-Condition Inventory Integrity**: If two technicians in remote yards issue the final drum of oil simultaneously, client-side or uncommitted application checks would permit both, causing negative physical inventory. Database row locking guarantees atomic serialization.
+
+### Why this way:
+- **Row Locking in DB Trigger over Application-Level Locks**:
+  - *Alternative 1 Rejected (Relying solely on Express/controller `SELECT ... FOR UPDATE`)*: Any future direct SQL script, admin migration, or alternate microservice could bypass application locks. Placing `PERFORM ... FOR UPDATE` inside the `BEFORE INSERT` trigger enforces serialization at the database engine level, impossible to bypass.
+- **NULL Cost over Sentinel Values (e.g., -1.00 or 0.00)**:
+  - *Alternative 2 Rejected (Using 0.00 or sentinel flag)*: Sentinel values corrupt mathematical aggregates (`AVG()`, `SUM(qty * unit_cost)`). In standard relational database theory, `NULL` correctly signifies "unknown / pending invoice". Standard SQL aggregates ignore `NULL` naturally.
+
+### How it works:
+1. Field technician records 50 units of oil received offline. The event syncs with `unit_cost = NULL`.
+2. When management checks `GET /api/materials/:id/price-history`, the query aggregates `SUM(qty * unit_cost)` strictly over `unit_cost IS NOT NULL AND qty > 0`. The 50 unpriced units increase physical stock on hand without altering the average cost per unit.
+3. When a technician returns machine #1 of a 2-machine rental, `handleEquipmentReturn` sets `returned_at` on item #1, verifies `COUNT(*) WHERE returned_at IS NULL = 1` (> 0), and leaves `rentals.status` open.
+4. When machine #2 is returned, `COUNT(*) WHERE returned_at IS NULL = 0`, triggering `UPDATE rentals SET status = 'returned'`.
+5. Two parallel HTTP requests hit `POST /api/sync` simultaneously issuing 1 unit from an item with 1 unit in stock.
+6. Both execute `INSERT INTO stock_movements`. The Postgres trigger executes `PERFORM id FROM items WHERE id = NEW.item_id FOR UPDATE`.
+7. Request A locks the item, sees 1 unit in stock, and inserts.
+8. Request B waits for the lock. Upon Request A's commit, Request B reads committed stock (0 units), calculates `0 - 1 = -1 < 0`, and the trigger throws an exception.
+9. `syncController` catches the trigger error, categorizes it as `INSUFFICIENT_STOCK`, rolls back Request B, records the rejection in `sync_events`, and returns HTTP 200 with `status: 'rejected'`.
+
+### Concepts used:
+- **Pessimistic Row Locking (`FOR UPDATE`) in DB Triggers**: Enforcing concurrency boundaries against phantom reads under `READ COMMITTED` isolation.
+- **Three-Valued SQL Logic & `NULL` Semantics**: Differentiating between free items (cost 0.00) and unbilled inventory (cost NULL) in financial accounting.
+- **Partial vs Complete Contract State Transitions**: Modeling aggregate line-item lifecycle completion before transitioning root entities.
+- **RFC 7234 Private Cache Directives**: Directing intermediate proxies not to store authenticated, role-sensitive responses.
+
+### Risks and assumptions:
+- **Supplier Invoice Linking**: Unpriced stock movements (`unit_cost IS NULL`) should eventually be reconciled when the admin records the corresponding supplier invoice (`POST /api/invoices/supplier`).
+- **Deadlock Avoidance**: Because row locks are acquired only on parent `items` during decrements, deadlocks are avoided as movements lock a single item ID per insert.
+
+### 30-second explanation:
+> *"We hardened the offline sync engine against real-world edge cases. Field goods receipts now store cost as NULL so unpriced deliveries never warp company inventory valuation or average costs. Rental contracts with multiple machines now remain open until every single machine is checked back into a yard. Offline snapshots are marked private so edge servers never cache role data, and the database stock trigger now locks the item row, guaranteeing that two workers issuing the last spare part at the same millisecond can never drive inventory below zero."*
+
+### Likely questions:
+1. **"Why does the database trigger lock the `items` row instead of `stock_movements`?"**
+   *Answer*: In an append-only ledger, new rows in `stock_movements` do not exist yet to be locked. To serialize inserts that calculate an aggregate (`SUM(qty)`) across the ledger, we lock the shared parent row in `items`. This forces concurrent issue transactions for the same SKU to queue up sequentially.
+2. **"What happens to the inventory valuation when unpriced goods arrive?"**
+   *Answer*: Physical stock on hand increases immediately so workers can issue and use the parts. However, weighted average cost and financial valuation are calculated solely from priced receipts. Once accounting enters the supplier invoice, the price is officially recorded.
+3. **"If a customer rents 5 generators and returns 4, what status does the rental have?"**
+   *Answer*: The rental status remains 'picked_up' (or 'confirmed'). The 4 returned generators are marked returned with arrival timestamps and become immediately available in the yard for new jobs, but the rental agreement stays open until the 5th generator is returned.
+
+### How to verify:
+1. Run all backend automated test suites:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 7 test suites pass cleanly (**83 tests passed**, including all 28 tests in `offline_events.test.ts`).
+2. Verify TypeScript type checking:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: `tsc --noEmit` exits with 0 errors.
+
+
+---
+
+## Step 6: Equipment QR Labels, Plain Natural Key Payloads, High Error Correction, and Printable A4 Sheets
+
+### What we built:
+1. **Plain Natural Key QR Payload Architecture**:
+   - Designed QR generation so the encoded payload is strictly the plain `asset_code` string (e.g. `CRN-50-001`), completely free of URLs, protocols, ports, or web path prefixes.
+   - Documented the architectural trade-offs in [ADR 012](decisions/012-plain-text-qr-payload-and-high-error-correction.md): plain natural keys survive domain migrations, intranet shifts, protocol upgrades, and decades of infrastructure refactoring without rendering physical equipment stickers dead.
+2. **Industrial Error Correction Level H**:
+   - Standardized QR matrix generation on ISO/IEC 18004 Error Correction Level **H** (~30% recovery capability).
+   - Guarantees that heavy machinery tags exposed to abrasive desert sandstorms, grease, hydraulic fluid, sun exposure, and chassis scratches in Eastern Province worksites remain 100% decipherable by camera scanners.
+3. **Printable A4 Sheet & Batch Label Endpoint (`GET /api/labels/sheet`)**:
+   - Implemented `GET /api/labels/sheet` accessible to any authenticated user (`admin` or `staff`).
+   - Supports explicit multi-code selection via `assetCodes=A,B,C` as well as filter-based queries (`type_id`, `type`, `status`, `location_id`).
+   - Renders a self-contained, print-optimized A4 grid document (`@page { size: A4 portrait; margin: 10mm; }`, `@media print`) with high-resolution QR codes, bold monospace asset codes, equipment make/model, type, capacity specs, and base yard tags.
+   - Supports programmatic `format=json` or `Accept: application/json` for API consumers.
+4. **Hard Cap Resource Protection (Max 50 Labels)**:
+   - Enforces a strict hard cap of 50 labels per request. Rejects oversized requests with HTTP 400 Bad Request to protect Node.js server resources from CPU/memory bitmap exhaustion and align with standard 6-page A4 print batches.
+5. **Strict Zero-Money / Commercial Privacy Invariant**:
+   - Guarantees that physical label sheets and QR responses contain zero financial properties (no rates, costs, replacement values, prices, invoices, or tax figures). Prevents leakage of confidential commercial terms to jobsite third parties.
+6. **Automated Test Suite (`backend/src/__tests__/labels.test.ts`)**:
+   - Implemented 16 automated integration tests using `supertest`, `pngjs`, and pure JavaScript QR decoder `jsqr`.
+   - Verifies end-to-end that generated QR matrices decode back to the exact plain `asset_code`, unknown codes return HTTP 404, the 50-label cap is strictly enforced, zero money fields exist in HTML or JSON, and role-based authentication operates as expected.
+   - Brought test suite to **99 passing tests across 8 test suites**.
+
+### Why it exists:
+- **Field Operational Longevity**: Physical tags attached to crane booms and generator housings must last years. If labels encode a URL (`https://app.spaceexspace.com/...`), any corporate domain rename or server reorganization requires manually finding and re-tagging hundreds of machines in active industrial zones.
+- **Harsh Industrial Durability**: Construction tags operate in extreme outdoor heat, dust, and grease. Low error-correction QR codes become unreadable after minor abrasions, halting field tracking.
+- **Commercial Data Confidentiality**: Physical tags on equipment in multi-contractor job sites are visible to client procurement managers and rival equipment suppliers. Labels must never display equipment cost or hire rates.
+- **Denial of Service Prevention**: Server-side QR matrix generation consumes CPU cycles. A hard cap prevents users or automated jobs from requesting 10,000 labels in a single unpaginated request.
+
+### Why this way:
+- **Plain Text Natural Key over Web URLs**:
+  - *Alternative 1 Rejected (Encoding full URLs like `https://app.spaceexspace.com/equipment/CRN-50-001`)*: Tying printed stickers to a hostname creates a catastrophic failure point if the company migrates domains or switches hosting environments. The in-app camera scanner reads text either way and dispatches to `/api/equipment/:asset_code`.
+- **Error Correction Level H over Level L or M**:
+  - *Alternative 2 Rejected (Level L 7% or M 15%)*: While generating slightly simpler pixel grids, low error correction fails in real-world construction yards where stickers inevitably get scratched, dusty, or oil-smeared.
+- **Native Pure CSS A4 Grid over Heavy Headless Browsers**:
+  - *Alternative 3 Rejected (Puppeteer / Chromium PDF generation)*: Running headless Chrome inside a lightweight Node.js container adds 300MB+ in memory footprint, native C++ dependencies, and slow execution. Pure HTML with standard `@page { size: A4 portrait; }` and `@media print` renders instantly in the browser and prints natively with zero server overhead.
+
+### How it works:
+1. User or mobile client calls `GET /api/labels/sheet?assetCodes=CRN-50-001,GEN-250-001` with an `Authorization: Bearer <token>` header.
+2. `labelsController` validates the query schema using Zod and parses the comma-separated or array codes.
+3. If codes count > 50, it returns HTTP 400 Bad Request immediately.
+4. It queries `v_equipment_current` for the requested codes. If any code is missing from the database, it returns HTTP 404 Not Found identifying the unknown codes.
+5. For each equipment item, `generateQrCodeDataUrl` calls `QRCode.toDataURL(item.asset_code, { errorCorrectionLevel: 'H' })`, producing a base64 PNG data URL encoding the plain natural code.
+6. The controller checks requested format:
+   - If JSON is requested, returns `{ count: 2, labels: [...] }`.
+   - If HTML is requested (default), `renderPrintableHtmlGrid` generates an A4 print-ready HTML page with 2-column grid cards, large monospace asset codes, and technical specs.
+7. Yard staff opens the sheet and clicks "Print Labels (A4)", sending the job directly to standard label stock or paper.
+
+### Concepts used:
+- **Natural Key QR Encoding**: Encoding stable domain business keys instead of surrogate database IDs or volatile network URLs.
+- **Reed-Solomon Error Correction**: Utilizing mathematical polynomial error correction codes (Level H) to reconstruct damaged 2D barcode modules up to a 30% area loss.
+- **CSS Paged Media (`@page`, `@media print`)**: Structuring print layouts with page breaks, margins, and exact millimeter dimensions for physical paper standards.
+- **Defense in Depth Data Stripping**: Physically excluding sensitive commercial fields at both database query level and template rendering level.
+
+### Risks and assumptions:
+- **Physical Label Material**: While Level H provides 30% error recovery, labels in petrochemical environments should still use UV-resistant, thermal transfer synthetic vinyl or anodized aluminium tags to prevent physical adhesive failure.
+- **Scanner Camera Resolution**: Error correction Level H adds modules (increasing matrix density). Low-resolution smartphone cameras may need to hold closer (10–15 cm) to resolve dense QR matrices.
+
+### 30-second explanation:
+> *"We built the QR label generation system for industrial durability and permanent longevity. Physical labels encode only the plain asset code rather than a web URL, meaning stickers will never break if the company changes domains or server infrastructure. We standardized on error correction Level H so tags can lose 30% of their surface to grease or scratches and still scan instantly. The endpoint generates printable A4 sheets, enforces a 50-label safety cap, and guarantees that zero commercial rates or prices ever appear on physical machinery tags."*
+
+### Likely questions:
+1. **"Why not put a URL in the QR code so standard phone cameras can open the web app?"**
+   *Answer*: A URL ties every physical label on hundreds of machines across Saudi Arabia to a specific domain name. If the domain changes or moves to a private corporate network, every physical sticker becomes dead. In contrast, the plain asset code survives indefinitely, and the in-app scanner extracts the plain text directly.
+2. **"What happens if an operator enters an asset code with a typo?"**
+   *Answer*: The endpoint cross-references all requested codes against `v_equipment_current` in a single query. If any requested code does not exist, it fails fast with HTTP 404 and names the exact missing code so typos are caught before printing sheets.
+3. **"Why is there a hard cap of 50 labels per request?"**
+   *Answer*: Generating high-resolution QR bitmaps server-side is CPU- and memory-intensive. Capping requests at 50 prevents denial-of-service memory spikes while perfectly matching typical yard print batches (~6 pages of A4 label stock).
+
+### How to verify:
+1. Run all backend automated test suites:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 8 test suites pass cleanly (**99 tests passed**, including all 16 tests in `labels.test.ts`).
+2. Verify TypeScript type checking:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: `tsc --noEmit` exits with 0 errors.
+
+
+---
+
+## Step 6b: Production Deployment Readiness, Proxy Trust, Seed Safeguards, and Disaster Recovery
+
+### What we built:
+1. **Multi-Stage Production Dockerfile (`backend/Dockerfile`)**:
+   - Implemented a two-stage Docker build based on `node:20-alpine`.
+   - *Stage 1 (Builder)*: Installs build toolchains (`python3`, `make`, `g++`), compiles TypeScript into `/app/dist`, and copies database migrations.
+   - *Stage 2 (Runner)*: Minimal production image containing only production dependencies (`npm ci --omit=dev`), the compiled `/dist`, and `/migrations`.
+   - Executes under unprivileged `USER node` (UID 1000) with `dumb-init` as PID 1 to gracefully forward `SIGTERM`/`SIGINT` termination signals to Express and close database connection pools cleanly.
+   - Includes container-native health check probe (`wget http://127.0.0.1:3000/health`).
+2. **Hardened Production Docker Compose (`docker-compose.prod.yml`)**:
+   - Configures production services (`postgres` and `backend`) on an isolated bridge network (`space_exspace_prod_net`).
+   - Limits PostgreSQL network access to internal containers with host port strictly bound to `127.0.0.1:5432` (never exposed to public internet).
+   - Backend depends on PostgreSQL `service_healthy` condition before starting.
+   - Binds backend HTTP port to `127.0.0.1:3000` to ensure an edge reverse proxy (Nginx/Caddy) terminates TLS and protects the application.
+3. **Upstream Reverse Proxy Trust (`app.set('trust proxy', 1)`)**:
+   - Configured Express with `app.set('trust proxy', 1)` in `backend/src/app.ts`.
+   - Directs Express to trust the first upstream reverse proxy hop so `req.ip` correctly resolves the genuine client IP from `X-Forwarded-For`.
+   - Prevents `loginRateLimiter` from collapsing all client traffic into the reverse proxy IP, eliminating false brute-force lockouts across independent users.
+4. **Fail-Fast Production Environment Validation**:
+   - Enhanced `envSchema` in `backend/src/config/env.ts` using Zod refinements.
+   - Strictly refuses server boot in `NODE_ENV=production` if `JWT_SECRET` matches default development keys.
+   - Strictly enforces that `CORS_ORIGIN` is configured from the environment.
+   - Enforces that if `ALLOW_DEMO_SEED=true` in production, `DEMO_ADMIN_PASSWORD` and `DEMO_STAFF_PASSWORD` must be explicitly defined via environment variables.
+5. **Database Seed Safety Guard**:
+   - Updated `backend/src/db/seed.ts` to strictly refuse execution under `NODE_ENV=production` unless `ALLOW_DEMO_SEED=true` is explicitly set.
+   - Extracts initial demonstration credentials from `DEMO_ADMIN_PASSWORD` and `DEMO_STAFF_PASSWORD` environment variables rather than hardcoded defaults or public README documentation.
+6. **Automated Daily Backups & Disaster Recovery Test Scripts**:
+   - Created `scripts/backup_daily.sh`: Non-blocking compressed `pg_dump -Fc` with timestamping and automated 14-day retention rotation.
+   - Created `scripts/restore.sh`: End-to-end disaster recovery script that drops/recreates target test databases, restores data via `pg_restore`, and verifies table row counts and derived view `v_equipment_current` integrity.
+7. **Comprehensive Production Deployment Guide (`docs/DEPLOY.md`)**:
+   - Detailed step-by-step launch runbook, required environment variables reference table, backup/restore procedures, and an architectural comparison between a Small Cloud VPS vs. Managed Cloud Platforms across cost, maintenance effort, backups, and Middle East data sovereignty.
+8. **ADR 013**:
+   - Published [ADR 013: Production Deployment Readiness, Proxy Trust Architecture, and Demonstration Seeding Safeguards](decisions/013-production-deployment-readiness-and-proxy-trust.md).
+9. **Automated Test Suite (`backend/src/__tests__/deployment.test.ts`)**:
+   - Added 13 integration tests verifying proxy trust IP resolution, health check DB reporting, production seed refusal, ALLOW_DEMO_SEED overrides, fail-fast env validation, Helmet security headers, and CORS credentials.
+   - Brought test suite to **112 passing tests across 9 test files**.
+
+### Why it exists:
+- **Brute-Force Attack Prevention**: Without `trust proxy: 1`, Express views all traffic arriving from an edge reverse proxy as having the proxy's IP. One user failing 10 login attempts would throttle the entire company's access to the API.
+- **Accidental Production Data Loss Prevention**: Developers running `npm run seed` or CI/CD pipelines targeting production databases could overwrite active rental agreements and equipment location histories. The refusal guard guarantees production data is untouchable without explicit double-opt-in flags.
+- **Credential Protection**: Hardcoded demo credentials in repository code or README documentation create critical vulnerabilities if test instances are exposed. Externalizing passwords to environment variables eliminates hardcoded secrets.
+- **Container Footprint & Security**: Single-stage builds carry TypeScript compilers, Python, and C++ build tools into production, ballooning image sizes and expanding vulnerability attack surfaces. Multi-stage builds strip ~80% of unnecessary files and run under an unprivileged user.
+
+### Why this way:
+- **`trust proxy: 1` over `trust proxy: true`**:
+  - *Alternative 1 Rejected (Setting `trust proxy: true`)*: Trusting all hops allows attackers on the public internet to spoof `X-Forwarded-For: 1.1.1.1` and bypass rate limiters or forge client IPs in audit logs. Setting `1` instructs Express to trust exactly one trusted hop from the internal reverse proxy.
+- **`ALLOW_DEMO_SEED=true` Flag over Total Removal of Seeder**:
+  - *Alternative 2 Rejected (Completely deleting `seed.ts` from production builds)*: QA and client demo environments frequently run in `NODE_ENV=production` to replicate production performance. Providing an explicit opt-in flag allows controlled staging demonstrations without risking live operational databases.
+- **Dedicated VPS Baseline over Multi-Tenant Serverless**:
+  - *Alternative 3 Rejected (Deploying to serverless/PaaS like AWS Lambda + Aurora Serverless)*: Serverless database connection spikes, VPC cold starts, unpredictable monthly cloud egress bills, and regional Middle East latency make containerized VPS Docker Compose much simpler, cheaper ($10/mo), and fully sovereign for Phase 1.
+
+### How it works:
+1. Reverse proxy (e.g. Nginx) receives HTTPS traffic from mobile clients and sets `X-Forwarded-For: <client_ip>` when proxying to `127.0.0.1:3000`.
+2. Express evaluates `req.ip` via `trust proxy: 1`, extracting `<client_ip>`.
+3. `loginRateLimiter` keys the 10-attempt bucket strictly to that specific client IP.
+4. During container startup, Zod parses environment variables. If `NODE_ENV=production` and `JWT_SECRET` is the default key, the container halts immediately with exit code 1.
+5. If an engineer invokes `npm run seed` in production without `ALLOW_DEMO_SEED=true`, `seedDatabase()` immediately throws an error and rolls back before touching database rows.
+6. If `ALLOW_DEMO_SEED=true`, the seeder hashes passwords provided in `DEMO_ADMIN_PASSWORD` and `DEMO_STAFF_PASSWORD`.
+7. `scripts/backup_daily.sh` executes nightly via cron, triggering `pg_dump -Fc` inside the database container and pruning backups older than 14 days.
+
+### Concepts used:
+- **Multi-Stage Container Builds**: Separating compile-time toolchains from runtime execution environments to produce minimal attack surface artifacts.
+- **Reverse Proxy Hop Trust (`X-Forwarded-For`)**: Parsing trusted header positions in reverse proxy chains to prevent IP spoofing while preserving client attribution.
+- **Defense in Depth Environment Validation**: Super-refining Zod schemas to block insecure configuration states during the boot phase.
+- **Principle of Least Privilege**: Running containerized workloads as unprivileged user `node` rather than `root`.
+- **Signal Forwarding with Init Systems (`dumb-init`)**: Handling process signal hierarchies inside Docker containers to prevent zombie processes and ensure graceful termination.
+
+### Risks and assumptions:
+- **Proxy Configuration Dependency**: `trust proxy: 1` assumes exactly one reverse proxy layer between the public internet and Express. If Cloudflare CDN is placed in front of Nginx, the hop count must be adjusted to 2 or configured with CIDR ranges.
+- **Backup Offsite Synchronization**: `scripts/backup_daily.sh` stores dumps on the local VPS disk. In live production, backups should be synced to an offsite S3 bucket or encrypted secondary cloud storage.
+
+### 30-second explanation:
+> *"We made the platform 100% production-ready. We created a lean, multi-stage Alpine Dockerfile that runs as a non-root user and added a production Docker Compose stack. Express now trusts the upstream reverse proxy so brute-force login protection tracks real client IPs rather than locking out the proxy. The database seeder refuses to run in production unless explicitly overridden with custom password environment variables. Finally, we added automated daily backup and restore scripts and documented a full comparison between a small VPS and managed cloud platforms in DEPLOY.md."*
+
+### Likely questions:
+1. **"What happens if someone accidentally runs `npm run seed` on the production server?"**
+   *Answer*: The seeder checks `NODE_ENV === 'production'`. Because `ALLOW_DEMO_SEED` is not set to `true`, the script logs an error and immediately aborts the transaction before altering any rows.
+2. **"Why does the production Docker Compose bind ports to `127.0.0.1` instead of `0.0.0.0`?"**
+   *Answer*: Binding to `127.0.0.1` ensures that PostgreSQL (port 5432) and the Node.js API (port 3000) are never directly exposed to the public internet. All external access must pass through the host's reverse proxy with TLS encryption.
+3. **"Why use a small VPS instead of AWS ECS + RDS for the initial rollout?"**
+   *Answer*: For Phase 1, a small VPS running Docker Compose costs ~$10/month, requires zero vendor-specific cloud lock-in, and guarantees data residency in the Middle East. As operational volume scales past 50 concurrent yards, the stateless backend can easily migrate to managed cloud containers.
+
+### How to verify:
+1. Run all backend automated test suites:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 9 test suites pass cleanly (**112 tests passed**, including all 13 tests in `deployment.test.ts`).
+2. Verify TypeScript type checking:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: `tsc --noEmit` exits with 0 errors.
+3. Verify production environment validation and seed safety:
+   ```bash
+   npm --workspace=backend run test -- src/__tests__/deployment.test.ts
+   ```
+   *Expected Result*: All deployment readiness and guard tests pass.
+
+---
+
+## Step 6c: Demo Hosting Hardening, Caddy Automated HTTPS, Same-Origin SPA Delivery, Mobile Camera Secure Context, and Off-Site S3 Replication
+
+### What we built:
+1. **Caddy Edge Ingress & Automated HTTPS (`Caddyfile` & `docker-compose.prod.yml`)**:
+   - Integrated Caddy v2 as the public ingress reverse proxy handling ports 80, 443, and 443/UDP (HTTP/3 QUIC).
+   - Configured automatic TLS certificate provisioning and maintenance via Let's Encrypt / ZeroSSL.
+   - Configured streaming compression (`zstd` and `gzip`) for API responses and static web bundles.
+   - Applied production security headers: `Strict-Transport-Security` (HSTS), `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy: strict-origin-when-cross-origin`, and `Permissions-Policy: camera=(self)`.
+2. **Same-Origin SPA & API Architecture**:
+   - Caddy serves compiled React frontend static files from `/srv` (`try_files {path} /index.html`) while proxying `/api/*` and `/health` requests to `backend:3000`.
+   - Eliminated Cross-Origin Resource Sharing (CORS) preflight requests, cookie restrictions, and credential-blocking across separate ports or domains.
+3. **Mobile Camera QR Scanner HTTPS Compliance (Secure Context)**:
+   - Codified and documented the W3C Secure Context requirement: mobile browsers (iOS Safari, Android Chrome) strictly block `navigator.mediaDevices.getUserMedia` when accessed over plain HTTP. Automated TLS via Caddy guarantees that yard technicians can scan equipment QR labels without browser sandbox permission failures.
+4. **Proxy Hop Trust Rationale (`app.set('trust proxy', 1)`)**:
+   - Documented in `docs/DEPLOY.md` why trusting exactly 1 upstream proxy hop aligns with Caddy's position as the direct ingress proxy.
+   - Documented that if an upstream CDN (e.g. Cloudflare, AWS CloudFront) is layered in front of Caddy, the hop count must be adjusted to 2 or configured with trusted CIDR blocks to preserve client IP isolation in `loginRateLimiter`.
+5. **Off-Site Database Replication via `rclone` with Loud Failure (`scripts/backup_daily.sh`)**:
+   - Integrated off-site replication to an S3-compatible bucket (`rclone copyto`) following non-blocking `pg_dump -Fc`.
+   - Built to **fail loudly**: exits with code 10 if `rclone` is missing, and code 20 if the cloud upload fails, ensuring ops alerts and cron error logs fire immediately rather than failing silently.
+6. **Monthly Disaster Recovery Restore Test Checklist (`docs/DEPLOY.md`)**:
+   - Added a mandatory monthly operational checklist reminding operators to test restoration of off-site dumps against clean target databases and verify row counts and derived view `v_equipment_current` queries.
+7. **Strict Production Environment Validation**:
+   - Enforced that `JWT_SECRET` must be strictly ≥ 32 characters in `NODE_ENV=production` within `backend/src/config/env.ts`.
+   - Added automated test cases in `backend/src/__tests__/deployment.test.ts` verifying that short secrets (< 32 chars) are rejected in production while allowed in development.
+8. **Client Unanswered Questions & Cost Annotations**:
+   - Updated `docs/OPEN_QUESTIONS.md` with questions 11–14 (DNS delegation, S3 backup credentials, barcode scanner hardware vs mobile camera, and KSA data residency).
+   - Annotated all pricing figures and data residency statements in `docs/DEPLOY.md` with `"(to verify before quoting)"`.
+9. **ADR 014**:
+   - Published [ADR 014: Caddy Edge Reverse Proxy, Same-Origin Architecture, Mobile Camera Secure Context, and Off-Site S3 Backups](decisions/014-caddy-reverse-proxy-same-origin-and-offsite-backup.md).
+
+### Why it exists:
+- **Zero-Friction Client Deployment**: Separate frontend and backend origins create persistent CORS bugs, preflight latency on mobile 4G networks, and cookie isolation issues. Delivering both from the same origin under Caddy simplifies deployment to a single domain.
+- **Hardware Access Enforcement**: Scanning equipment QR codes in outdoor yards requires HTML5 camera access. Browsers silently disable camera APIs on plain HTTP origins; automatic HTTPS solves this without manual certificate renewal maintenance.
+- **Catastrophic Hardware Outage Recovery**: Backups stored solely on the host VPS are destroyed if the VPS disk or hypervisor fails. Automated off-site S3 replication with loud failure ensures backups survive server destruction.
+- **Rate-Limiter Attribution**: Without documented hop counts, misconfigured reverse proxy trust collapses all users into a single IP, allowing one rogue client to lock out an entire company from the API.
+
+### Why this way:
+- **Caddy over Nginx + Certbot**:
+  - *Alternative 1 Rejected (Nginx with external Certbot container)*: Requires managing cron renewal hooks, volume sharing for webroot ACME challenges, and signal reloads. Caddy natively automates ACME certificate issuance, renewal, and OCSP stapling in-memory.
+- **Loud Backup Failures over Silent Degradation**:
+  - *Alternative 2 Rejected (Logging a warning and exiting 0 when S3 copy fails)*: Backup failures that exit 0 do not trigger cron email alerts or monitoring pagers. Exiting with non-zero codes (10 and 20) ensures automated visibility.
+- **Single-Origin over Cross-Domain API (`api.domain.com`)**:
+  - *Alternative 3 Rejected (Deploying API on a subdomain with wildcard CORS)*: Subdomains require separate TLS certificates, double the DNS configuration, and force mobile browsers to execute preflight `OPTIONS` requests before every POST/PATCH action.
+
+### How it works:
+1. When public HTTPS traffic hits port 443, Caddy terminates TLS using its automated Let's Encrypt / ZeroSSL certificate.
+2. If the request path begins with `/api/*` or matches `/health`, Caddy proxies it to `backend:3000` inside the internal Docker bridge network, setting `X-Forwarded-For: {remote_host}`.
+3. Express processes `/api/*` requests, resolves `req.ip` via `trust proxy: 1`, applies rate-limiting per client IP, and returns JSON responses.
+4. For all other routes, Caddy serves compiled React assets from `/srv`, falling back to `/index.html` for client-side routing.
+5. In production, `backend/src/config/env.ts` parses `JWT_SECRET`. If its length is < 32 characters, the process immediately halts with exit code 1.
+6. Nightly at 02:00 AM AST, cron runs `scripts/backup_daily.sh`. The script executes `pg_dump -Fc` inside the DB container, verifies file size > 100 bytes, uploads the archive to an S3 bucket via `rclone copyto`, and deletes local archives older than 14 days. If the S3 upload fails, it exits immediately with error code 20.
+7. On the first Monday of each month, the operations team executes `./scripts/restore.sh` following the checklist in `docs/DEPLOY.md` to verify data recovery.
+
+### Concepts used:
+- **Reverse Proxy Ingress**: Positioning an edge server to manage TLS termination, HTTP/3 transport, and traffic routing before requests reach application containers.
+- **Same-Origin Policy (SOP)**: A foundational web security model where scripts running on one origin cannot access data on another unless explicit CORS policies are granted. Same-origin deployment avoids CORS entirely.
+- **W3C Secure Context**: Security requirement mandating HTTPS for privileged browser APIs including `getUserMedia`, Service Workers, and Geolocation.
+- **Fail-Loud Architectural Pattern**: Engineering background maintenance jobs to fail aggressively with explicit exit codes when downstream dependencies are missing.
+- **Off-Site Air-Gapped / Secondary Storage**: Maintaining database backups in a geographically separate cloud provider from the primary compute host.
+
+### Risks and assumptions:
+- **DNS Record Propagation**: Caddy cannot obtain Let's Encrypt certificates until the domain's public DNS A/AAAA records point to the server's public IP address.
+- **S3 Bucket Credentials**: `rclone copyto` assumes valid S3 credentials configured in `rclone.conf`. If credentials expire or bucket permissions change, the script will exit with code 20 until updated.
+
+### 30-second explanation:
+> *"In Step 6c, we hardened the platform for live demonstration and production hosting. We added Caddy to Docker Compose, which automates HTTPS certificates and serves the frontend and backend under the exact same domain. This eliminates CORS problems and provides the Secure Context that mobile phone cameras strictly require for scanning QR codes in the yard. We also updated the daily backup script to replicate dumps off-site to an S3 bucket using rclone—failing loudly if the upload ever fails—and added a monthly restore drill checklist to DEPLOY.md."*
+
+### Likely questions:
+1. **"Why does Caddy serving both frontend and backend eliminate CORS problems?"**
+   *Answer*: CORS is a browser security mechanism that restricts a web page on one domain or port from making requests to a different domain or port. By using Caddy to serve the frontend static files at `/` and reverse-proxy the API at `/api`, both share the exact same protocol, hostname, and port. The browser considers them same-origin, eliminating preflight `OPTIONS` requests and cross-origin blocking entirely.
+2. **"Why is HTTPS strictly necessary for the yard QR scanner to work?"**
+   *Answer*: Mobile browsers treat camera access as a privileged API. Under the W3C Secure Context specification, `navigator.mediaDevices.getUserMedia` is disabled on non-localhost HTTP connections. Without HTTPS, mobile phones in the yard cannot access camera hardware to scan asset tags.
+3. **"Why does the backup script fail with exit code 10 and 20 instead of just logging a warning?"**
+   *Answer*: Silent backup failures are a major cause of catastrophic data loss. If an off-site S3 backup fails, logging a warning and returning 0 fools cron and monitoring systems into thinking the backup succeeded. Exiting with non-zero error codes guarantees that monitoring agents, cron logs, and ops alert channels fire immediately.
+
+### How to verify:
+1. Run backend tests to verify environment validation and deployment guards:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All test suites pass (**113 tests passed**, including all 14 tests in `deployment.test.ts`).
+2. Run TypeScript linting:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: Exits with code 0.
+3. Verify production secret validation:
+   ```bash
+   npm --workspace=backend run test -- src/__tests__/deployment.test.ts
+   ```
+   *Expected Result*: All 14 tests pass, including rejection of `JWT_SECRET < 32` characters in production.
+
+---
+
+## Step 6d: Backup Encryption (rclone crypt), Write-Only S3 Ingress, Stepwise HSTS Rollout, and Disaster Recovery Hardening
+
+### What we built:
+1. **Client-Side Encrypted Off-Site Backups (`scripts/backup_daily.sh`)**:
+   - Integrated an `rclone crypt` remote layer over the S3-compatible remote (`s3_crypt`) utilizing NaCl SecretBox (`XSalsa20-Poly1305`) and encrypted filenames.
+   - Encrypts PostgreSQL archives client-side in-memory before off-site transmission to cloud storage.
+   - Resolves passphrases and salts from environment variables (`BACKUP_CRYPT_PASSPHRASE`, `BACKUP_CRYPT_SALT`) or a root-only file (`/etc/space_exspace/backup_crypt.key`, `chmod 600`), refusing unencrypted uploads (exit code 11) and never logging secrets.
+2. **Write-Only S3 Ingress Architecture**:
+   - Configured `scripts/backup_daily.sh` to operate strictly under write-only IAM permissions (`s3:PutObject` only; no `s3:GetObject`, `s3:ListBucket`, or `s3:DeleteObject`).
+   - Removed remote pruning from the script, delegating remote lifecycle retention to S3 Bucket Lifecycle Rules (e.g., expire objects after 30 days) to prevent a compromised server from deleting historical cloud backups.
+   - Preserved local 14-day disk rotation via filesystem cleanup (`find -mtime +14`).
+3. **Decryption & Encryption Proof Verification (`scripts/restore.sh`)**:
+   - Updated `scripts/restore.sh` to handle encrypted dumps and verify that `pg_restore` strictly rejects raw encrypted archives before attempting decryption.
+   - Configured decryption via `rclone crypt` using separate read-only credentials supplied off-server at drill time.
+   - Cleans up temporary decrypted plaintext dump files securely via an exit trap.
+4. **Configurable Stepwise HSTS Policy (`Caddyfile` & `docker-compose.prod.yml`)**:
+   - Made HSTS `max-age` configurable via `HSTS_MAX_AGE` environment variable (default: `300` seconds for demo/staging).
+   - Removed `includeSubDomains` and `preload` from the default header to prevent accidental bricking of unconfigured subdomains during pilots.
+   - Documented the stepwise rollout path (`300` -> `86400` -> `604800` -> `31536000`) and the browser pinning risks in `docs/DEPLOY.md`.
+5. **Operational Key Custody & Cloud Ownership Documentation**:
+   - Documented the critical key custody rule: losing the crypt passphrase permanently destroys all backups; it must be stored in dual safe locations (enterprise vault and offline office safe).
+   - Documented the exact Write-Only and Read-Only IAM policies, S3 lifecycle rules, and Caddyfile syntax validation (`caddy validate`) in `docs/DEPLOY.md`.
+   - Updated `docs/OPEN_QUESTIONS.md` with questions 15–16 (S3 bucket ownership and cryptographic key escrow).
+6. **ADR 015**:
+   - Published [ADR 015: Client-Side Backup Encryption (rclone crypt), Write-Only S3 Ingress, and Stepwise HSTS Rollout](decisions/015-client-side-backup-encryption-and-hsts-policy.md).
+7. **Automated Test Suite (`backend/src/__tests__/deployment.test.ts`)**:
+   - Added 5 new tests verifying Caddyfile HSTS default max-age (300s), omission of `includeSubDomains` and `preload`, environment variable substitution, backup script crypt layer enforcement, absence of remote script pruning, and restore encryption proof assertions.
+   - Brought test suite to **118 passing tests across 9 test files**.
+
+### Why it exists:
+- **Defense in Depth for Cloud Storage**: Cloud storage buckets can suffer from accidental public exposure or credential leaks. Client-side encryption ensures that even if an S3 bucket is compromised, attackers obtain only encrypted high-entropy ciphertext.
+- **Ransomware & Server Wipe Containment**: If a threat actor breaches the production host, write-only IAM permissions ensure they cannot delete, overwrite, or download past company database snapshots from S3.
+- **Availability Protection against Overzealous HSTS**: Serving a 1-year HSTS header with `preload` or `includeSubDomains` on a new or unstable domain can permanently lock users out if DNS or TLS records need to change. A 300-second default enables safe iteration.
+- **Dual Custody Disaster Recovery**: Without tested encryption proofs and documented key custody, encrypted backups frequently become unrecoverable write-only black holes when staff rotate or servers crash.
+
+### Why this way:
+- **Client-Side `rclone crypt` over Server-Side S3 Encryption (SSE)**:
+  - *Alternative 1 Rejected (Relying solely on AWS SSE-S3 or SSE-KMS)*: SSE decrypts automatically whenever any IAM credential with read permissions accesses the object. If AWS account credentials leak, SSE provides zero defense. Client-side encryption requires a separate cryptographic passphrase unknown to AWS.
+- **S3 Bucket Lifecycle Rules over Script-Driven Deletion (`rclone delete`)**:
+  - *Alternative 2 Rejected (Granting delete permissions to the backup script)*: Giving the daily script `s3:DeleteObject` allows a compromised server to purge all backups. Enforcing write-only credentials and handling retention via S3 lifecycle rules guarantees immutable retention.
+- **Configurable `HSTS_MAX_AGE` (300s Default) over Hardcoded 1 Year**:
+  - *Alternative 3 Rejected (Hardcoding `max-age=31536000; includeSubDomains; preload`)*: Browser HSTS pins cannot be revoked by the server once cached. Staging domains and demo instances require short TTLs to permit rapid testing and rollback.
+
+### How it works:
+1. `scripts/backup_daily.sh` runs nightly at 02:00 AM AST.
+2. It checks for `BACKUP_CRYPT_PASSPHRASE` in the environment or reads `/etc/space_exspace/backup_crypt.key`. If missing, it exits immediately with error code 11.
+3. It runs `pg_dump -Fc` inside `space_exspace_db_prod` and verifies file size > 100 bytes.
+4. It sets up an on-the-fly `rclone crypt` remote (`s3_crypt`) wrapping the base S3 remote with obscured keys in memory, without logging passwords.
+5. `rclone copyto` streams the archive, encrypting it with NaCl SecretBox before uploading to S3 under write-only IAM credentials (`s3:PutObject`).
+6. S3 returns HTTP 200 PUT confirmation, and `rclone` exits 0. The script clears all secrets from memory and prunes local files older than 14 days.
+7. Cloud objects older than 30 days are purged automatically by the S3 lifecycle policy.
+8. During monthly drills, operators run `scripts/restore.sh`. It asserts that `pg_restore -l` rejects the encrypted file, decrypts it using read-only credentials and the passphrase, verifies the `PGDMP` header, restores to `space_exspace_restore_test`, checks row counts, and cleans up decrypted files from disk.
+
+### Concepts used:
+- **Client-Side Symmetric Encryption**: Encrypting payloads on the originating system before transmission over network boundaries.
+- **Write-Only IAM Credentials (Append-Only Ingress)**: Restricting service accounts to write-only operations (`PutObject`) to prevent read or delete access upon server compromise.
+- **Cryptographic Key Escrow & Custody**: Storing master encryption passphrases in off-server dual vaults to guarantee business continuity.
+- **HSTS Pinning**: Browser security caching enforcing HTTPS-only transport for a defined time-to-live (`max-age`).
+- **Object Lifecycle Policies**: Cloud storage provider rules that automatically transition or expire objects based on age without client compute intervention.
+
+### Risks and assumptions:
+- **Passphrase Loss**: If the `BACKUP_CRYPT_PASSPHRASE` is lost, all off-site backups are permanently unrecoverable. Dual offline custody is strictly required.
+- **S3 Lifecycle Rule Dependency**: Because the script does not delete remote objects, failure to configure the 30-day lifecycle rule in the cloud console will result in unbounded S3 storage accumulation.
+
+### 30-second explanation:
+> *"In Step 6d, we hardened off-site backups and domain security. Dumps are now encrypted client-side using rclone crypt before leaving the server, so even a public cloud bucket leak reveals only scrambled ciphertext. The server's upload key is write-only, meaning an attacker breaching the host can neither read past backups nor delete them; retention is handled automatically by S3 lifecycle rules. We also made HSTS max-age configurable with a safe 300-second demo default, avoiding the risk of bricking domains with premature 1-year browser pins."*
+
+### Likely questions:
+1. **"Why can't the daily backup script delete old remote backups from S3?"**
+   *Answer*: The upload key on the production server has write-only permissions (`s3:PutObject` only). If the script had delete permissions, an attacker who compromises the server could delete every off-site backup. By handling retention with S3 Bucket Lifecycle Rules, the cloud provider expires old files automatically, and no server credential has the power to destroy them.
+2. **"What happens if someone steals the S3 credentials from the production server?"**
+   *Answer*: They can only upload new objects. They cannot list existing files to see what is in the bucket, they cannot download past backups, and they cannot delete anything. Furthermore, because dumps are encrypted client-side with NaCl SecretBox before leaving the host, any data uploaded is completely unreadable without the separate crypt passphrase.
+3. **"Why start with HSTS max-age=300 instead of 31536000 (1 year)?"**
+   *Answer*: HSTS instructs browsers to refuse plain HTTP for the entire `max-age` duration. If you deploy a 1-year header during a demo or pilot and later need to change domains, fix certificates, or test subdomains, browsers will block connections for a full year with no server-side override. Starting at 300 seconds allows safe testing before stepping up to 1 day, 1 week, and finally 1 year in mature production.
+
+### How to verify:
+1. Run backend tests to verify HSTS header configuration, absence of includeSubDomains/preload, and backup script invariants:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 9 test suites pass (**118 tests passed**, including all 19 tests in `deployment.test.ts`).
+2. Run TypeScript linting:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: Exits cleanly with code 0.
+3. Verify Step 6d specific assertions:
+   ```bash
+   npm --workspace=backend run test -- src/__tests__/deployment.test.ts
+   ```
+   *Expected Result*: All 19 deployment and security safeguard tests pass.

@@ -1,0 +1,99 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: space_exspace_db_prod
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in production}
+      POSTGRES_DB: ${DB_NAME:-space_exspace}
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data
+    ports:
+      # Bound to localhost only - never expose database port directly to public internet
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-space_exspace}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app_net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: space_exspace_api_prod
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in production}
+      DB_NAME: ${DB_NAME:-space_exspace}
+      DATABASE_URL: postgres://${DB_USER:-postgres}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-space_exspace}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set with at least 32 characters in production}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-8h}
+      CORS_ORIGIN: ${CORS_ORIGIN:-https://${DOMAIN:-app.spaceexspace.com}}
+      ALLOW_DEMO_SEED: ${ALLOW_DEMO_SEED:-false}
+      DEMO_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD:-}
+      DEMO_STAFF_PASSWORD: ${DEMO_STAFF_PASSWORD:-}
+    ports:
+      # Bound to 127.0.0.1 for local debugging/monitoring behind Caddy reverse proxy
+      - "127.0.0.1:${PORT:-3000}:3000"
+    networks:
+      - app_net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: space_exspace_frontend_prod
+    restart: "no"
+    volumes:
+      - frontend_dist:/dist
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: space_exspace_caddy_prod
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3 QUIC
+    environment:
+      DOMAIN: ${DOMAIN:-app.spaceexspace.com}
+      TLS_EMAIL: ${TLS_EMAIL:-admin@spaceexspace.com}
+      HSTS_MAX_AGE: ${HSTS_MAX_AGE:-300}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - frontend_dist:/srv:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend:
+        condition: service_started
+      frontend:
+        condition: service_completed_successfully
+    networks:
+      - app_net
+
+volumes:
+  postgres_data_prod:
+    name: space_exspace_postgres_data_prod
+  frontend_dist:
+    name: space_exspace_frontend_dist_prod
+  caddy_data:
+    name: space_exspace_caddy_data_prod
+  caddy_config:
+    name: space_exspace_caddy_config_prod
+
+networks:
+  app_net:
+    name: space_exspace_prod_net

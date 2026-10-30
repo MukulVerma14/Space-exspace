@@ -1,0 +1,51 @@
+{
+    email {$TLS_EMAIL:admin@spaceexspace.com}
+    admin off
+}
+
+{$DOMAIN:app.spaceexspace.com} {
+    # Modern compression for API JSON and frontend assets
+    encode zstd gzip
+
+    # Production Security Headers
+    header {
+        # Strict-Transport-Security (HSTS): configurable via HSTS_MAX_AGE (default 300s for demo; no includeSubDomains or preload)
+        Strict-Transport-Security "max-age={$HSTS_MAX_AGE:300}"
+        # Prevent MIME type sniffing
+        X-Content-Type-Options "nosniff"
+        # Frame protection against clickjacking
+        X-Frame-Options "SAMEORIGIN"
+        # Referrer Policy
+        Referrer-Policy "strict-origin-when-cross-origin"
+        # Camera Permissions-Policy: strictly required for mobile browser QR scanning in Secure Context
+        Permissions-Policy "camera=(self)"
+        # Hide Caddy server signature
+        -Server
+    }
+
+    # Reverse-proxy /api to the backend Express service
+    handle /api/* {
+        reverse_proxy backend:3000 {
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            header_up Host {host}
+        }
+    }
+
+    # Reverse-proxy /health probe to the backend service
+    handle /health {
+        reverse_proxy backend:3000 {
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            header_up Host {host}
+        }
+    }
+
+    # Serve built frontend static files from the same origin
+    # Same-origin architecture eliminates cross-origin resource sharing (CORS) friction and credential blocking
+    handle {
+        root * /srv
+        try_files {path} /index.html
+        file_server
+    }
+}

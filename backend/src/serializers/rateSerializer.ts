@@ -37,6 +37,11 @@ export function sanitizeFinancials<T>(data: T, userRole: UserRole): T {
     return data;
   }
 
+  // If Date, preserve as Date so JSON serialization produces ISO string
+  if (data instanceof Date) {
+    return data;
+  }
+
   // Handle arrays
   if (Array.isArray(data)) {
     return data.map((item) => sanitizeFinancials(item, userRole)) as unknown as T;
