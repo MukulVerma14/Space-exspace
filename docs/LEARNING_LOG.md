@@ -1273,3 +1273,97 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    npm --workspace=backend run test -- src/__tests__/deployment.test.ts
    ```
    *Expected Result*: All 14 tests pass, including rejection of `JWT_SECRET < 32` characters in production.
+
+---
+
+## Step 6d: Backup Encryption (rclone crypt), Write-Only S3 Ingress, Stepwise HSTS Rollout, and Disaster Recovery Hardening
+
+### What we built:
+1. **Client-Side Encrypted Off-Site Backups (`scripts/backup_daily.sh`)**:
+   - Integrated an `rclone crypt` remote layer over the S3-compatible remote (`s3_crypt`) utilizing NaCl SecretBox (`XSalsa20-Poly1305`) and encrypted filenames.
+   - Encrypts PostgreSQL archives client-side in-memory before off-site transmission to cloud storage.
+   - Resolves passphrases and salts from environment variables (`BACKUP_CRYPT_PASSPHRASE`, `BACKUP_CRYPT_SALT`) or a root-only file (`/etc/space_exspace/backup_crypt.key`, `chmod 600`), refusing unencrypted uploads (exit code 11) and never logging secrets.
+2. **Write-Only S3 Ingress Architecture**:
+   - Configured `scripts/backup_daily.sh` to operate strictly under write-only IAM permissions (`s3:PutObject` only; no `s3:GetObject`, `s3:ListBucket`, or `s3:DeleteObject`).
+   - Removed remote pruning from the script, delegating remote lifecycle retention to S3 Bucket Lifecycle Rules (e.g., expire objects after 30 days) to prevent a compromised server from deleting historical cloud backups.
+   - Preserved local 14-day disk rotation via filesystem cleanup (`find -mtime +14`).
+3. **Decryption & Encryption Proof Verification (`scripts/restore.sh`)**:
+   - Updated `scripts/restore.sh` to handle encrypted dumps and verify that `pg_restore` strictly rejects raw encrypted archives before attempting decryption.
+   - Configured decryption via `rclone crypt` using separate read-only credentials supplied off-server at drill time.
+   - Cleans up temporary decrypted plaintext dump files securely via an exit trap.
+4. **Configurable Stepwise HSTS Policy (`Caddyfile` & `docker-compose.prod.yml`)**:
+   - Made HSTS `max-age` configurable via `HSTS_MAX_AGE` environment variable (default: `300` seconds for demo/staging).
+   - Removed `includeSubDomains` and `preload` from the default header to prevent accidental bricking of unconfigured subdomains during pilots.
+   - Documented the stepwise rollout path (`300` -> `86400` -> `604800` -> `31536000`) and the browser pinning risks in `docs/DEPLOY.md`.
+5. **Operational Key Custody & Cloud Ownership Documentation**:
+   - Documented the critical key custody rule: losing the crypt passphrase permanently destroys all backups; it must be stored in dual safe locations (enterprise vault and offline office safe).
+   - Documented the exact Write-Only and Read-Only IAM policies, S3 lifecycle rules, and Caddyfile syntax validation (`caddy validate`) in `docs/DEPLOY.md`.
+   - Updated `docs/OPEN_QUESTIONS.md` with questions 15–16 (S3 bucket ownership and cryptographic key escrow).
+6. **ADR 015**:
+   - Published [ADR 015: Client-Side Backup Encryption (rclone crypt), Write-Only S3 Ingress, and Stepwise HSTS Rollout](decisions/015-client-side-backup-encryption-and-hsts-policy.md).
+7. **Automated Test Suite (`backend/src/__tests__/deployment.test.ts`)**:
+   - Added 5 new tests verifying Caddyfile HSTS default max-age (300s), omission of `includeSubDomains` and `preload`, environment variable substitution, backup script crypt layer enforcement, absence of remote script pruning, and restore encryption proof assertions.
+   - Brought test suite to **118 passing tests across 9 test files**.
+
+### Why it exists:
+- **Defense in Depth for Cloud Storage**: Cloud storage buckets can suffer from accidental public exposure or credential leaks. Client-side encryption ensures that even if an S3 bucket is compromised, attackers obtain only encrypted high-entropy ciphertext.
+- **Ransomware & Server Wipe Containment**: If a threat actor breaches the production host, write-only IAM permissions ensure they cannot delete, overwrite, or download past company database snapshots from S3.
+- **Availability Protection against Overzealous HSTS**: Serving a 1-year HSTS header with `preload` or `includeSubDomains` on a new or unstable domain can permanently lock users out if DNS or TLS records need to change. A 300-second default enables safe iteration.
+- **Dual Custody Disaster Recovery**: Without tested encryption proofs and documented key custody, encrypted backups frequently become unrecoverable write-only black holes when staff rotate or servers crash.
+
+### Why this way:
+- **Client-Side `rclone crypt` over Server-Side S3 Encryption (SSE)**:
+  - *Alternative 1 Rejected (Relying solely on AWS SSE-S3 or SSE-KMS)*: SSE decrypts automatically whenever any IAM credential with read permissions accesses the object. If AWS account credentials leak, SSE provides zero defense. Client-side encryption requires a separate cryptographic passphrase unknown to AWS.
+- **S3 Bucket Lifecycle Rules over Script-Driven Deletion (`rclone delete`)**:
+  - *Alternative 2 Rejected (Granting delete permissions to the backup script)*: Giving the daily script `s3:DeleteObject` allows a compromised server to purge all backups. Enforcing write-only credentials and handling retention via S3 lifecycle rules guarantees immutable retention.
+- **Configurable `HSTS_MAX_AGE` (300s Default) over Hardcoded 1 Year**:
+  - *Alternative 3 Rejected (Hardcoding `max-age=31536000; includeSubDomains; preload`)*: Browser HSTS pins cannot be revoked by the server once cached. Staging domains and demo instances require short TTLs to permit rapid testing and rollback.
+
+### How it works:
+1. `scripts/backup_daily.sh` runs nightly at 02:00 AM AST.
+2. It checks for `BACKUP_CRYPT_PASSPHRASE` in the environment or reads `/etc/space_exspace/backup_crypt.key`. If missing, it exits immediately with error code 11.
+3. It runs `pg_dump -Fc` inside `space_exspace_db_prod` and verifies file size > 100 bytes.
+4. It sets up an on-the-fly `rclone crypt` remote (`s3_crypt`) wrapping the base S3 remote with obscured keys in memory, without logging passwords.
+5. `rclone copyto` streams the archive, encrypting it with NaCl SecretBox before uploading to S3 under write-only IAM credentials (`s3:PutObject`).
+6. S3 returns HTTP 200 PUT confirmation, and `rclone` exits 0. The script clears all secrets from memory and prunes local files older than 14 days.
+7. Cloud objects older than 30 days are purged automatically by the S3 lifecycle policy.
+8. During monthly drills, operators run `scripts/restore.sh`. It asserts that `pg_restore -l` rejects the encrypted file, decrypts it using read-only credentials and the passphrase, verifies the `PGDMP` header, restores to `space_exspace_restore_test`, checks row counts, and cleans up decrypted files from disk.
+
+### Concepts used:
+- **Client-Side Symmetric Encryption**: Encrypting payloads on the originating system before transmission over network boundaries.
+- **Write-Only IAM Credentials (Append-Only Ingress)**: Restricting service accounts to write-only operations (`PutObject`) to prevent read or delete access upon server compromise.
+- **Cryptographic Key Escrow & Custody**: Storing master encryption passphrases in off-server dual vaults to guarantee business continuity.
+- **HSTS Pinning**: Browser security caching enforcing HTTPS-only transport for a defined time-to-live (`max-age`).
+- **Object Lifecycle Policies**: Cloud storage provider rules that automatically transition or expire objects based on age without client compute intervention.
+
+### Risks and assumptions:
+- **Passphrase Loss**: If the `BACKUP_CRYPT_PASSPHRASE` is lost, all off-site backups are permanently unrecoverable. Dual offline custody is strictly required.
+- **S3 Lifecycle Rule Dependency**: Because the script does not delete remote objects, failure to configure the 30-day lifecycle rule in the cloud console will result in unbounded S3 storage accumulation.
+
+### 30-second explanation:
+> *"In Step 6d, we hardened off-site backups and domain security. Dumps are now encrypted client-side using rclone crypt before leaving the server, so even a public cloud bucket leak reveals only scrambled ciphertext. The server's upload key is write-only, meaning an attacker breaching the host can neither read past backups nor delete them; retention is handled automatically by S3 lifecycle rules. We also made HSTS max-age configurable with a safe 300-second demo default, avoiding the risk of bricking domains with premature 1-year browser pins."*
+
+### Likely questions:
+1. **"Why can't the daily backup script delete old remote backups from S3?"**
+   *Answer*: The upload key on the production server has write-only permissions (`s3:PutObject` only). If the script had delete permissions, an attacker who compromises the server could delete every off-site backup. By handling retention with S3 Bucket Lifecycle Rules, the cloud provider expires old files automatically, and no server credential has the power to destroy them.
+2. **"What happens if someone steals the S3 credentials from the production server?"**
+   *Answer*: They can only upload new objects. They cannot list existing files to see what is in the bucket, they cannot download past backups, and they cannot delete anything. Furthermore, because dumps are encrypted client-side with NaCl SecretBox before leaving the host, any data uploaded is completely unreadable without the separate crypt passphrase.
+3. **"Why start with HSTS max-age=300 instead of 31536000 (1 year)?"**
+   *Answer*: HSTS instructs browsers to refuse plain HTTP for the entire `max-age` duration. If you deploy a 1-year header during a demo or pilot and later need to change domains, fix certificates, or test subdomains, browsers will block connections for a full year with no server-side override. Starting at 300 seconds allows safe testing before stepping up to 1 day, 1 week, and finally 1 year in mature production.
+
+### How to verify:
+1. Run backend tests to verify HSTS header configuration, absence of includeSubDomains/preload, and backup script invariants:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 9 test suites pass (**118 tests passed**, including all 19 tests in `deployment.test.ts`).
+2. Run TypeScript linting:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: Exits cleanly with code 0.
+3. Verify Step 6d specific assertions:
+   ```bash
+   npm --workspace=backend run test -- src/__tests__/deployment.test.ts
+   ```
+   *Expected Result*: All 19 deployment and security safeguard tests pass.

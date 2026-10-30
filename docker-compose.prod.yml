@@ -70,6 +70,7 @@ services:
     environment:
       DOMAIN: ${DOMAIN:-app.spaceexspace.com}
       TLS_EMAIL: ${TLS_EMAIL:-admin@spaceexspace.com}
+      HSTS_MAX_AGE: ${HSTS_MAX_AGE:-300}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - frontend_dist:/srv:ro

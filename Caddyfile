@@ -9,8 +9,8 @@
 
     # Production Security Headers
     header {
-        # Strict-Transport-Security (HSTS)
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        # Strict-Transport-Security (HSTS): configurable via HSTS_MAX_AGE (default 300s for demo; no includeSubDomains or preload)
+        Strict-Transport-Security "max-age={$HSTS_MAX_AGE:300}"
         # Prevent MIME type sniffing
         X-Content-Type-Options "nosniff"
         # Frame protection against clickjacking

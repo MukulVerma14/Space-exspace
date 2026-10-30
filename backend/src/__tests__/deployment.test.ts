@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import express from 'express';
+import fs from 'fs';
+import path from 'path';
 import { app } from '../app.js';
 import { seedDatabase } from '../db/seed.js';
 import { envSchema } from '../config/env.js';
@@ -8,7 +10,7 @@ import { pool } from '../db/pool.js';
 import * as poolModule from '../db/pool.js';
 import bcrypt from 'bcrypt';
 
-describe('Step 6b & 6c: Production Deployment Readiness & Operational Safeguards', () => {
+describe('Step 6b, 6c & 6d: Production Deployment Readiness & Operational Safeguards', () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
@@ -220,6 +222,98 @@ describe('Step 6b & 6c: Production Deployment Readiness & Operational Safeguards
 
       expect(res.headers['access-control-allow-origin']).toBe('http://localhost:5173');
       expect(res.headers['access-control-allow-credentials']).toBe('true');
+    });
+  });
+
+  describe('Step 6d: Caddyfile HSTS Security Header Policy & Validation', () => {
+    const caddyfilePath = path.resolve(process.cwd(), '../Caddyfile');
+
+    it('contains the Caddyfile configuration file at repository root', () => {
+      expect(fs.existsSync(caddyfilePath)).toBe(true);
+    });
+
+    it('configures HSTS with configurable max-age defaulting to 300 seconds for demo', () => {
+      const caddyfileContent = fs.readFileSync(caddyfilePath, 'utf8');
+
+      // Assert that Strict-Transport-Security is defined with {$HSTS_MAX_AGE:300}
+      expect(caddyfileContent).toMatch(/Strict-Transport-Security\s+"max-age={\$HSTS_MAX_AGE:300}"/);
+    });
+
+    it('omits includeSubDomains and preload from the default HSTS header', () => {
+      const caddyfileContent = fs.readFileSync(caddyfilePath, 'utf8');
+      const hstsDirective = caddyfileContent
+        .split('\n')
+        .map((line) => line.trim())
+        .find((line) => line.startsWith('Strict-Transport-Security'));
+
+      expect(hstsDirective).toBeDefined();
+      expect(hstsDirective).not.toContain('includeSubDomains');
+      expect(hstsDirective).not.toContain('preload');
+    });
+
+    it('renders default 300 seconds when HSTS_MAX_AGE is not provided', () => {
+      const caddyfileContent = fs.readFileSync(caddyfilePath, 'utf8');
+      const hstsMatch = caddyfileContent.match(/Strict-Transport-Security\s+"([^"]+)"/);
+      expect(hstsMatch).not.toBeNull();
+
+      const rawDirective = hstsMatch![1];
+      // Simulate Caddy's template substitution: {$HSTS_MAX_AGE:300} -> 300 when unset
+      const evaluatedDefault = rawDirective.replace(/\{\$HSTS_MAX_AGE:300\}/g, '300');
+      expect(evaluatedDefault).toBe('max-age=300');
+      expect(evaluatedDefault).not.toContain('includeSubDomains');
+      expect(evaluatedDefault).not.toContain('preload');
+    });
+
+    it('renders custom duration (e.g. 1 year for mature production) when HSTS_MAX_AGE is set', () => {
+      const caddyfileContent = fs.readFileSync(caddyfilePath, 'utf8');
+      const hstsMatch = caddyfileContent.match(/Strict-Transport-Security\s+"([^"]+)"/);
+      expect(hstsMatch).not.toBeNull();
+
+      const rawDirective = hstsMatch![1];
+      // Simulate Caddy's template substitution with production 1 year (31536000s)
+      const evaluatedProd = rawDirective.replace(/\{\$HSTS_MAX_AGE:300\}/g, '31536000');
+      expect(evaluatedProd).toBe('max-age=31536000');
+    });
+  });
+
+  describe('Step 6d: Backup Encryption & Write-Only Invariants in Scripts', () => {
+    const backupScriptPath = path.resolve(process.cwd(), '../scripts/backup_daily.sh');
+    const restoreScriptPath = path.resolve(process.cwd(), '../scripts/restore.sh');
+
+    it('enforces client-side crypt encryption layer before off-site S3 replication', () => {
+      expect(fs.existsSync(backupScriptPath)).toBe(true);
+      const backupContent = fs.readFileSync(backupScriptPath, 'utf8');
+
+      // Asserts that rclone crypt remote is configured
+      expect(backupContent).toContain('RCLONE_CONFIG_S3_CRYPT_TYPE="crypt"');
+      expect(backupContent).toContain('s3_crypt:');
+      // Asserts that missing passphrase exits with fatal error code 11
+      expect(backupContent).toContain('exit 11');
+      // Asserts that secrets are cleared from environment
+      expect(backupContent).toContain('unset RCLONE_CONFIG_S3_CRYPT_PASSWORD');
+    });
+
+    it('does not contain remote deletion or pruning commands due to write-only IAM permissions', () => {
+      const backupContent = fs.readFileSync(backupScriptPath, 'utf8');
+
+      // Write-only IAM accounts cannot list or delete remote objects.
+      // Remote pruning must NOT be performed by the backup script.
+      expect(backupContent).not.toMatch(/rclone\s+(delete|rm|purge)\s+s3/);
+      expect(backupContent).not.toMatch(/rclone\s+deletefile\s+s3/);
+
+      // Local disk rotation must be preserved
+      expect(backupContent).toContain('Purging local backups older than');
+      expect(backupContent).toContain('find "${BACKUP_DIR}"');
+    });
+
+    it('restore script verifies encryption proof before attempting restoration', () => {
+      expect(fs.existsSync(restoreScriptPath)).toBe(true);
+      const restoreContent = fs.readFileSync(restoreScriptPath, 'utf8');
+
+      // Restore script must test pg_restore rejection against raw encrypted files
+      expect(restoreContent).toContain('PGDMP');
+      expect(restoreContent).toContain('PROOF VERIFIED: pg_restore rejected raw encrypted file');
+      expect(restoreContent).toContain('RCLONE_CONFIG_S3_CRYPT_TYPE="crypt"');
     });
   });
 });

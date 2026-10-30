@@ -1,6 +1,6 @@
 # Production Deployment Guide: SPACE EXSPACE Fleet Platform
 
-This document describes the production deployment architecture, step-by-step launch procedure, required environment variables, automated backup/restore routines with off-site replication, and an architectural comparison between a Small VPS and a Managed Cloud Platform.
+This document describes the production deployment architecture, step-by-step launch procedure, required environment variables, client-side encrypted backup/restore routines with off-site S3 replication, HSTS configuration guidelines, and an architectural comparison between a Small VPS and a Managed Cloud Platform.
 
 > [!NOTE]
 > Every cost figure and data-residency statement in this document is marked as **"(to verify before quoting)"** to ensure financial and regulatory commitments are vetted prior to commercial quoting.
@@ -16,7 +16,7 @@ In production, the backend and frontend run in a hardened, containerized environ
                                      │
                           ┌──────────▼──────────┐
                           │    Caddy v2 Proxy   │ (Automatic HTTPS, Let's Encrypt / ZeroSSL,
-                          │  [space_exspace_    │  zstd/gzip, HSTS, camera=(self))
+                          │  [space_exspace_    │  zstd/gzip, HSTS max-age, camera=(self))
                           │    caddy_prod]      │
                           └─────┬────────────┬──┘
                                 │            │
@@ -36,6 +36,18 @@ In production, the backend and frontend run in a hardened, containerized environ
 
 ### Security & Operational Invariants
 - **Same-Origin Architecture**: Caddy serves both the compiled React frontend static assets (`/srv`) and proxies `/api/*` requests to the Node.js backend under the exact same domain (e.g. `https://app.spaceexspace.com`). This completely eliminates Cross-Origin Resource Sharing (CORS) preflight roundtrips, browser cookie blocking, and credential friction.
+- **Configurable HTTP Strict Transport Security (HSTS)**:
+  - Caddy sends the `Strict-Transport-Security` header configured via the `HSTS_MAX_AGE` environment variable (default: **300 seconds** for demonstrations; contains neither `includeSubDomains` nor `preload` by default).
+  - **Browser Pinning Behavior & Critical Warning**: Once a client browser receives an HSTS header, it pins HTTPS for that domain and will refuse all plaintext HTTP connections for the duration of `max-age`. If a certificate expires or DNS changes prematurely, users will be locked out until `max-age` elapses.
+  - **Stepwise Production Rollout**:
+    - *Stage 1 (Demo / Pilot)*: `HSTS_MAX_AGE=300` (5 minutes) — permits quick recovery if routing or DNS errors occur.
+    - *Stage 2 (Initial Stable Deployment)*: `HSTS_MAX_AGE=86400` (1 day) — verify for 1 week that all clients and webhooks connect over HTTPS cleanly.
+    - *Stage 3 (Intermediate Staging)*: `HSTS_MAX_AGE=604800` (1 week) — run for 2–4 weeks.
+    - *Stage 4 (Full Mature Production)*: `HSTS_MAX_AGE=31536000` (1 year / 365 days) — industry standard for production banking and logistics applications.
+  - **Caddyfile Validation**: To validate configuration syntax before reloading in production, execute:
+    ```bash
+    caddy validate --config Caddyfile --adapter caddyfile
+    ```
 - **Mobile Camera QR Scanning Requires HTTPS (Secure Context)**:
   Modern mobile browsers (Safari on iOS, Chrome on Android) strictly enforce the W3C Secure Context specification for `navigator.mediaDevices.getUserMedia`. Web applications running over plain HTTP (non-secure) are blocked by browser sandboxes from accessing camera video hardware. Caddy automates public TLS certificates (Let's Encrypt / ZeroSSL), guaranteeing immediate, valid HTTPS encryption required for yard technicians to scan equipment QR codes.
 - **Reverse Proxy Hop Trust (`app.set('trust proxy', 1)`)**:
@@ -51,7 +63,7 @@ In production, the backend and frontend run in a hardened, containerized environ
 ## 2. Production Run Steps
 
 ### Step 1: Server Provisioning
-Ensure Docker and Docker Compose v2 are installed on the Linux host (e.g., Ubuntu 24.04 LTS / Debian 12):
+Ensure Docker, Docker Compose v2, and rclone are installed on the Linux host (e.g., Ubuntu 24.04 LTS / Debian 12):
 ```bash
 sudo apt update && sudo apt install -y curl git docker.io docker-compose-v2 rclone
 sudo systemctl enable --now docker
@@ -63,7 +75,7 @@ git clone https://github.com/MukulVerma14/Space-exspace.git /opt/space-exspace
 cd /opt/space-exspace
 ```
 
-### Step 3: Configure Production Environment (`.env`)
+### Step 3: Configure Production Environment (`.env`) & Key Custody
 Create `/opt/space-exspace/.env` with strict permissions (`chmod 600 .env`):
 ```bash
 # Server & Domain
@@ -71,6 +83,9 @@ NODE_ENV=production
 PORT=3000
 DOMAIN=app.spaceexspace.com
 TLS_EMAIL=admin@spaceexspace.com
+
+# HTTP Strict Transport Security (HSTS)
+HSTS_MAX_AGE=300
 
 # Database Credentials
 DB_HOST=postgres
@@ -90,10 +105,21 @@ CORS_ORIGIN=https://app.spaceexspace.com
 # Demo Seeding Guard (set to 'false' in live production)
 ALLOW_DEMO_SEED=false
 
-# Off-site S3 Backup Config (for scripts/backup_daily.sh)
+# Off-site S3 Backup Configuration
 RCLONE_REMOTE=s3_backup
 RCLONE_BUCKET=space-exspace-backups
+
+# Client-Side Encryption Key Custody (or store in root-only /etc/space_exspace/backup_crypt.key)
+BACKUP_CRYPT_PASSPHRASE=UltraSecureClientSideBackupPassphrase_987654321!
+BACKUP_CRYPT_SALT=UniqueCryptSaltString_123456789!
 ```
+
+> [!CAUTION]
+> **CRITICAL KEY CUSTODY RULE**:
+> Losing the `BACKUP_CRYPT_PASSPHRASE` means **permanently losing every off-site backup**. Because encryption is performed client-side using NaCl SecretBox before leaving the server, neither AWS nor the hosting provider can recover the data.
+> You MUST store the crypt passphrase and salt in **two separate safe places** outside this server:
+> 1. In a team enterprise password manager (e.g., 1Password, Bitwarden, or HashiCorp Vault).
+> 2. In an offline physical sealed envelope inside the company's physical office safe.
 
 ### Step 4: Build and Launch Containers
 ```bash
@@ -122,21 +148,16 @@ docker compose -f docker-compose.prod.yml exec \
 # Verify internal backend health probe
 curl -i http://127.0.0.1:3000/health
 
-# Verify public edge Caddy HTTPS response
+# Verify public edge Caddy HTTPS response & HSTS header
 curl -i https://app.spaceexspace.com/health
 ```
 *Expected Response (`200 OK`)*:
-```json
-{
-  "status": "ok",
-  "uptimeSeconds": 14,
-  "timestamp": "2026-10-30T10:45:00.000Z",
-  "environment": "production",
-  "database": {
-    "status": "connected",
-    "latencyMs": 1.2
-  }
-}
+```http
+HTTP/2 200
+strict-transport-security: max-age=300
+x-content-type-options: nosniff
+permissions-policy: camera=(self)
+...
 ```
 
 ---
@@ -149,6 +170,7 @@ curl -i https://app.spaceexspace.com/health
 | `PORT` | Number | No | Application listen port (default: `3000`). | Internal container port proxied by Caddy. Never expose raw port to public internet. |
 | `DOMAIN` | String | **Yes** | Public FQDN (e.g. `app.spaceexspace.com`). | Used by Caddy for automatic Let's Encrypt / ZeroSSL TLS certificate acquisition. |
 | `TLS_EMAIL` | String | No | Administrator email for ACME TLS certificate registration. | Default: `admin@spaceexspace.com`. Used for certificate renewal notices. |
+| `HSTS_MAX_AGE` | Number | No | HSTS `max-age` header duration in seconds (default: `300`). | Staging/Demo: 300. Stepwise rollout: 86400 (1d), 604800 (1w), 31536000 (1y). |
 | `DB_HOST` | String | **Yes** | PostgreSQL hostname (`postgres` inside Docker). | Resolves via internal Docker network `space_exspace_prod_net`. |
 | `DB_PORT` | Number | **Yes** | PostgreSQL port (default: `5432`). | Internal container communication port. |
 | `DB_USER` | String | **Yes** | PostgreSQL username. | Use dedicated role (e.g. `space_admin`), avoid default superusers. |
@@ -160,76 +182,79 @@ curl -i https://app.spaceexspace.com/health
 | `ALLOW_DEMO_SEED` | String | No | Controls whether seed script is permitted in production (`true`/`false`). | Default `false`. Prevents accidental production data overwrites. |
 | `DEMO_ADMIN_PASSWORD` | String | Conditional | Initial admin password if seeding demo data. | Required in production if `ALLOW_DEMO_SEED=true`. Min 8 chars. |
 | `DEMO_STAFF_PASSWORD` | String | Conditional | Initial staff password if seeding demo data. | Required in production if `ALLOW_DEMO_SEED=true`. Min 8 chars. |
-| `RCLONE_REMOTE` | String | No | rclone remote name for off-site backups (default: `s3_backup`). | Configured in `~/.config/rclone/rclone.conf`. |
-| `RCLONE_BUCKET` | String | No | Target S3 bucket for off-site backups (default: `space-exspace-backups`). | Off-site S3-compatible cloud storage bucket. |
+| `RCLONE_REMOTE` | String | No | rclone base S3 remote name (default: `s3_backup`). | Configured in `~/.config/rclone/rclone.conf` with write-only credentials. |
+| `RCLONE_BUCKET` | String | No | Target S3 bucket for off-site backups (default: `space-exspace-backups`). | Dedicated off-site cloud storage bucket. |
+| `BACKUP_CRYPT_PASSPHRASE` | String | **Yes** | Client-side encryption master passphrase for rclone crypt. | Used to encrypt dumps via NaCl SecretBox before leaving server. Never commit. |
+| `BACKUP_CRYPT_SALT` | String | No | Client-side encryption secondary salt for rclone crypt. | Key derivation salt. Store securely with passphrase. |
+| `BACKUP_CRYPT_KEY_FILE` | String | No | Path to root-only file containing encryption keys (default: `/etc/space_exspace/backup_crypt.key`). | Must be chmod 600, owned by root. Alternative to env vars. |
 
 ---
 
-## 4. Automated Daily PostgreSQL Backup Routine with Off-Site S3 Replication
+## 4. Automated Daily PostgreSQL Encrypted Backup Routine
 
-Backups are executed using a non-blocking PostgreSQL dump (`pg_dump -Fc`), compressed with custom archive format, stored locally in `/var/backups/space_exspace`, and replicated off-site to an S3-compatible object storage bucket using `rclone`.
+Backups are executed using a non-blocking PostgreSQL dump (`pg_dump -Fc`), compressed with custom archive format, stored locally in `/var/backups/space_exspace`, and replicated off-site to an S3-compatible object storage bucket using **rclone client-side crypt encryption** (`NaCl SecretBox XSalsa20-Poly1305`).
 
-### Loud Failure Behavior
-The backup script is engineered to **fail loudly**:
-- If `rclone` is not installed or configured, the script exits immediately with **exit code 10**.
-- If the off-site S3 upload fails (network drop, invalid credentials, bucket permissions), the script exits immediately with **exit code 20**.
-- This loud failure ensures standard monitoring daemons, cron error logs, and pager alerts immediately notify engineering rather than silently skipping off-site storage.
+### 1. Write-Only S3 IAM Upload Credentials
+To protect against server compromise, the IAM credentials configured on the production host for `RCLONE_REMOTE` must have **write-only permissions for that single bucket**:
+- **Allowed Action**: `s3:PutObject` on `arn:aws:s3:::space-exspace-backups/daily/*`.
+- **Forbidden Actions**: `s3:GetObject`, `s3:ListBucket`, `s3:DeleteObject`.
 
-### Automated Backup Script (`scripts/backup_daily.sh`)
+#### Write-Only IAM Policy JSON:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "WriteOnlyBackupUpload",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::space-exspace-backups/daily/*"
+    }
+  ]
+}
+```
+
+> [!IMPORTANT]
+> **Why Write-Only?**
+> If an attacker compromises the production server and obtains the S3 API keys:
+> - They **cannot read or download** past database backups (`s3:GetObject` denied).
+> - They **cannot list** the contents of the bucket to map company assets (`s3:ListBucket` denied).
+> - They **cannot delete or overwrite** existing backups (`s3:DeleteObject` denied).
+> - Even for data currently in flight, client-side encryption ensures they only see NaCl SecretBox ciphertext.
+
+### 2. S3 Bucket Lifecycle Retention Policy (30 Days)
+Because write-only credentials cannot list or delete remote objects, `scripts/backup_daily.sh` does not perform remote pruning. Remote backup retention must be configured on the cloud storage bucket via an **S3 Lifecycle Rule**:
+1. Open the **AWS S3 Console** (or Cloudflare R2 / MinIO Console).
+2. Select bucket `space-exspace-backups` -> **Management** tab -> **Create lifecycle rule**.
+3. Rule Name: `ExpireDailyBackupsAfter30Days`.
+4. Prefix filter: `daily/`.
+5. Lifecycle Action: Select **Expire current versions of objects**.
+6. Days after object creation: **30 days**.
+7. Save rule. Objects older than 30 days are automatically purged server-side by S3 at zero compute cost.
+*(Local backups on the server disk retain 14 days of rotation via standard `find -mtime +14`).*
+
+### 3. Automated Backup Script (`scripts/backup_daily.sh`)
 ```bash
 #!/bin/bash
 set -euo pipefail
 
-BACKUP_DIR="${BACKUP_DIR:-/var/backups/space_exspace}"
-CONTAINER_NAME="${CONTAINER_NAME:-space_exspace_db_prod}"
-DB_USER="${DB_USER:-space_admin}"
-DB_NAME="${DB_NAME:-space_exspace}"
-RETENTION_DAYS="${RETENTION_DAYS:-14}"
+# S3 configuration
+RCLONE_REMOTE="s3_backup"
+RCLONE_BUCKET="space-exspace-backups"
 
-# Off-site S3 configuration
-RCLONE_REMOTE="${RCLONE_REMOTE:-s3_backup}"
-RCLONE_BUCKET="${RCLONE_BUCKET:-space-exspace-backups}"
-
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-BACKUP_FILE="${BACKUP_DIR}/space_exspace_backup_${TIMESTAMP}.dump"
-LOG_PREFIX="[$(date +"%Y-%m-%d %H:%M:%S")]"
-
-mkdir -p "${BACKUP_DIR}"
-
-# 1. Execute pg_dump inside the database container using custom compressed format (-Fc)
-docker exec -t "${CONTAINER_NAME}" pg_dump \
-  -U "${DB_USER}" \
-  -d "${DB_NAME}" \
-  -Fc \
-  --no-owner \
-  --no-privileges \
-  > "${BACKUP_FILE}"
-
-# 2. Verify file size is non-zero (> 100 bytes)
-FILE_SIZE=$(wc -c < "${BACKUP_FILE}" | tr -d ' ')
-if [ "${FILE_SIZE}" -le 100 ]; then
-  echo "${LOG_PREFIX} ❌ Backup failed: output file is suspiciously small (${FILE_SIZE} bytes)." >&2
-  rm -f "${BACKUP_FILE}"
-  exit 1
+# Key resolution from root-only file or environment
+KEY_FILE="/etc/space_exspace/backup_crypt.key"
+if [ -z "${BACKUP_CRYPT_PASSPHRASE:-}" ] && [ -f "${KEY_FILE}" ]; then
+  source "${KEY_FILE}"
 fi
 
-# 3. Off-Site Replication via rclone to S3-compatible bucket
-RCLONE_DEST="${RCLONE_REMOTE}:${RCLONE_BUCKET}/daily/$(basename "${BACKUP_FILE}")"
-if ! command -v rclone &> /dev/null; then
-  echo "${LOG_PREFIX} ❌ FATAL ERROR: 'rclone' executable not found in PATH! Off-site S3 backup failed." >&2
-  exit 10
-fi
-
-if ! rclone copyto "${BACKUP_FILE}" "${RCLONE_DEST}" --stats 10s --stats-one-line; then
-  echo "${LOG_PREFIX} ❌ FATAL ERROR: rclone upload to ${RCLONE_DEST} FAILED!" >&2
-  exit 20
-fi
-
-# 4. Cleanup local backups older than retention window (14 days)
-find "${BACKUP_DIR}" -name "space_exspace_backup_*.dump" -mtime +"${RETENTION_DAYS}" -exec rm -v {} \;
+# Run pg_dump, verify non-empty archive, configure rclone crypt, and upload
+./scripts/backup_daily.sh
 ```
 
-### Production Cron Setup
+### 4. Production Cron Setup
 To execute automatically every night at 02:00 AM AST:
 ```bash
 sudo crontab -e
@@ -247,16 +272,44 @@ Add the following line:
 > **MONTHLY DISASTER RECOVERY DRILL (Mandatory Operating Routine)**:
 > Backups that have never been tested for restoration are not backups. On the **first Monday of every month**, the designated system operator must run the disaster recovery verification procedure below against a staging or test database.
 
+### Separate Read-Only Restore Credentials
+Restores require **read-only S3 credentials** (`s3:GetObject`, `s3:ListBucket`) and the `BACKUP_CRYPT_PASSPHRASE`.
+These credentials are **kept off the production server** and are injected by the operator only during scheduled drills or true disaster recovery scenarios.
+
+#### Read-Only IAM Policy JSON:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadOnlyBackupDownload",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::space-exspace-backups",
+        "arn:aws:s3:::space-exspace-backups/*"
+      ]
+    }
+  ]
+}
+```
+
 ### Monthly Restore Drill Checklist:
-- [ ] 1. Download the latest backup archive from the off-site S3 bucket via `rclone copyto`.
-- [ ] 2. Execute `./scripts/restore.sh <dump_path> space_exspace_restore_test`.
-- [ ] 3. Verify that row counts match across core tables (`equipment`, `users`, `rentals`, `stock_movements`, `sync_events`).
-- [ ] 4. Verify that `v_equipment_current` executes with valid derived statuses (`available`, `rented`, `under_repair`).
-- [ ] 5. Document the test date, archive name, and verification sign-off in the operational log.
+- [ ] 1. Operator logs into a test host or staging server and loads read-only S3 credentials.
+- [ ] 2. Download the target encrypted backup from `s3_crypt:` using `rclone copyto`.
+- [ ] 3. **Verify Encryption Proof**: Run `pg_restore -l <encrypted_file>` to prove the archive cannot be read without the passphrase. Confirm `pg_restore` rejects the header.
+- [ ] 4. Execute `./scripts/restore.sh` with `BACKUP_CRYPT_PASSPHRASE` to decrypt and restore into `space_exspace_restore_test`.
+- [ ] 5. Confirm row counts match across core tables (`equipment`, `users`, `rentals`, `stock_movements`, `sync_events`).
+- [ ] 6. Confirm derived view `v_equipment_current` executes with non-empty fleet data.
+- [ ] 7. Document the test date, archive name, and verification sign-off in the operational log.
 
 ### Step-by-Step Restore Procedure:
 ```bash
-# Execute disaster recovery restore verification
+# Execute disaster recovery restore verification with client-side decryption
+BACKUP_CRYPT_PASSPHRASE="YourSecureCryptPassphrase" \
 ./scripts/restore.sh /var/backups/space_exspace/space_exspace_backup_20261030_020000.dump space_exspace_restore_test
 ```
 
@@ -275,7 +328,7 @@ Add the following line:
      --clean \
      --if-exists \
      --no-owner \
-     --no-privileges < /var/backups/space_exspace/latest.dump
+     --no-privileges < /var/backups/space_exspace/latest_decrypted.dump
    ```
 
 3. **Verify Table Row Counts**:
@@ -309,7 +362,7 @@ When selecting production infrastructure for SPACE EXSPACE, we evaluate a **Smal
 | :--- | :--- | :--- |
 | **Monthly Cost** *(to verify before quoting)* | **\$6 – \$14 / month (to verify before quoting)** (Flat-rate for 2 vCPU, 4GB RAM, 80GB NVMe SSD, unlimited egress). Highly predictable. | **\$40 – \$110+ / month (to verify before quoting)** (Compute \$15–\$25, Managed DB \$20–\$50, egress & logging add-ons (to verify before quoting)). Variable monthly bills. |
 | **Operational Effort** | **Moderate (Self-Managed)**: Requires OS security patches (`unattended-upgrades`), Docker daemon updates, UFW firewall maintenance, and Caddy reverse proxy configuration. | **Low (Turnkey)**: Zero OS maintenance. Automatic container deployment from Git, managed SSL certificates, and managed database version upgrades. |
-| **Backups & Recovery** | **Scripted & Self-Maintained**: Daily `pg_dump` cron script with automated `rclone` off-site replication to S3-compatible object storage. Restore testing is verified monthly via checklist. | **Automated & Point-in-Time**: 1-click snapshots, automated daily backups with retention sliders, and point-in-time database rollback. |
+| **Backups & Recovery** | **Scripted & Self-Maintained**: Daily `pg_dump` cron script with automated `rclone` client-side crypt off-site replication to S3-compatible object storage. Restore testing is verified monthly via checklist. | **Automated & Point-in-Time**: 1-click snapshots, automated daily backups with retention sliders, and point-in-time database rollback. |
 | **Account Ownership & Data Sovereignty** *(to verify before quoting)* | **100% Client Owned**: SPACE EXSPACE owns the root Linux server and encrypted disk volumes. Data resides in the designated region (e.g. in-kingdom KSA or UAE data centers) adhering to Saudi data residency regulations (to verify before quoting). | **Third-Party Managed**: Data hosted inside shared multitenant platform infrastructure. Vendor account lock-in; potential latency to Middle Eastern mobile clients if regional PoPs are unavailable (to verify before quoting). |
 
 ### Architectural Recommendation
