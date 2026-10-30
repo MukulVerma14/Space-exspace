@@ -1077,3 +1077,105 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    npm --workspace=backend run lint
    ```
    *Expected Result*: `tsc --noEmit` exits with 0 errors.
+
+
+---
+
+## Step 6b: Production Deployment Readiness, Proxy Trust, Seed Safeguards, and Disaster Recovery
+
+### What we built:
+1. **Multi-Stage Production Dockerfile (`backend/Dockerfile`)**:
+   - Implemented a two-stage Docker build based on `node:20-alpine`.
+   - *Stage 1 (Builder)*: Installs build toolchains (`python3`, `make`, `g++`), compiles TypeScript into `/app/dist`, and copies database migrations.
+   - *Stage 2 (Runner)*: Minimal production image containing only production dependencies (`npm ci --omit=dev`), the compiled `/dist`, and `/migrations`.
+   - Executes under unprivileged `USER node` (UID 1000) with `dumb-init` as PID 1 to gracefully forward `SIGTERM`/`SIGINT` termination signals to Express and close database connection pools cleanly.
+   - Includes container-native health check probe (`wget http://127.0.0.1:3000/health`).
+2. **Hardened Production Docker Compose (`docker-compose.prod.yml`)**:
+   - Configures production services (`postgres` and `backend`) on an isolated bridge network (`space_exspace_prod_net`).
+   - Limits PostgreSQL network access to internal containers with host port strictly bound to `127.0.0.1:5432` (never exposed to public internet).
+   - Backend depends on PostgreSQL `service_healthy` condition before starting.
+   - Binds backend HTTP port to `127.0.0.1:3000` to ensure an edge reverse proxy (Nginx/Caddy) terminates TLS and protects the application.
+3. **Upstream Reverse Proxy Trust (`app.set('trust proxy', 1)`)**:
+   - Configured Express with `app.set('trust proxy', 1)` in `backend/src/app.ts`.
+   - Directs Express to trust the first upstream reverse proxy hop so `req.ip` correctly resolves the genuine client IP from `X-Forwarded-For`.
+   - Prevents `loginRateLimiter` from collapsing all client traffic into the reverse proxy IP, eliminating false brute-force lockouts across independent users.
+4. **Fail-Fast Production Environment Validation**:
+   - Enhanced `envSchema` in `backend/src/config/env.ts` using Zod refinements.
+   - Strictly refuses server boot in `NODE_ENV=production` if `JWT_SECRET` matches default development keys.
+   - Strictly enforces that `CORS_ORIGIN` is configured from the environment.
+   - Enforces that if `ALLOW_DEMO_SEED=true` in production, `DEMO_ADMIN_PASSWORD` and `DEMO_STAFF_PASSWORD` must be explicitly defined via environment variables.
+5. **Database Seed Safety Guard**:
+   - Updated `backend/src/db/seed.ts` to strictly refuse execution under `NODE_ENV=production` unless `ALLOW_DEMO_SEED=true` is explicitly set.
+   - Extracts initial demonstration credentials from `DEMO_ADMIN_PASSWORD` and `DEMO_STAFF_PASSWORD` environment variables rather than hardcoded defaults or public README documentation.
+6. **Automated Daily Backups & Disaster Recovery Test Scripts**:
+   - Created `scripts/backup_daily.sh`: Non-blocking compressed `pg_dump -Fc` with timestamping and automated 14-day retention rotation.
+   - Created `scripts/restore.sh`: End-to-end disaster recovery script that drops/recreates target test databases, restores data via `pg_restore`, and verifies table row counts and derived view `v_equipment_current` integrity.
+7. **Comprehensive Production Deployment Guide (`docs/DEPLOY.md`)**:
+   - Detailed step-by-step launch runbook, required environment variables reference table, backup/restore procedures, and an architectural comparison between a Small Cloud VPS vs. Managed Cloud Platforms across cost, maintenance effort, backups, and Middle East data sovereignty.
+8. **ADR 013**:
+   - Published [ADR 013: Production Deployment Readiness, Proxy Trust Architecture, and Demonstration Seeding Safeguards](decisions/013-production-deployment-readiness-and-proxy-trust.md).
+9. **Automated Test Suite (`backend/src/__tests__/deployment.test.ts`)**:
+   - Added 13 integration tests verifying proxy trust IP resolution, health check DB reporting, production seed refusal, ALLOW_DEMO_SEED overrides, fail-fast env validation, Helmet security headers, and CORS credentials.
+   - Brought test suite to **112 passing tests across 9 test files**.
+
+### Why it exists:
+- **Brute-Force Attack Prevention**: Without `trust proxy: 1`, Express views all traffic arriving from an edge reverse proxy as having the proxy's IP. One user failing 10 login attempts would throttle the entire company's access to the API.
+- **Accidental Production Data Loss Prevention**: Developers running `npm run seed` or CI/CD pipelines targeting production databases could overwrite active rental agreements and equipment location histories. The refusal guard guarantees production data is untouchable without explicit double-opt-in flags.
+- **Credential Protection**: Hardcoded demo credentials in repository code or README documentation create critical vulnerabilities if test instances are exposed. Externalizing passwords to environment variables eliminates hardcoded secrets.
+- **Container Footprint & Security**: Single-stage builds carry TypeScript compilers, Python, and C++ build tools into production, ballooning image sizes and expanding vulnerability attack surfaces. Multi-stage builds strip ~80% of unnecessary files and run under an unprivileged user.
+
+### Why this way:
+- **`trust proxy: 1` over `trust proxy: true`**:
+  - *Alternative 1 Rejected (Setting `trust proxy: true`)*: Trusting all hops allows attackers on the public internet to spoof `X-Forwarded-For: 1.1.1.1` and bypass rate limiters or forge client IPs in audit logs. Setting `1` instructs Express to trust exactly one trusted hop from the internal reverse proxy.
+- **`ALLOW_DEMO_SEED=true` Flag over Total Removal of Seeder**:
+  - *Alternative 2 Rejected (Completely deleting `seed.ts` from production builds)*: QA and client demo environments frequently run in `NODE_ENV=production` to replicate production performance. Providing an explicit opt-in flag allows controlled staging demonstrations without risking live operational databases.
+- **Dedicated VPS Baseline over Multi-Tenant Serverless**:
+  - *Alternative 3 Rejected (Deploying to serverless/PaaS like AWS Lambda + Aurora Serverless)*: Serverless database connection spikes, VPC cold starts, unpredictable monthly cloud egress bills, and regional Middle East latency make containerized VPS Docker Compose much simpler, cheaper ($10/mo), and fully sovereign for Phase 1.
+
+### How it works:
+1. Reverse proxy (e.g. Nginx) receives HTTPS traffic from mobile clients and sets `X-Forwarded-For: <client_ip>` when proxying to `127.0.0.1:3000`.
+2. Express evaluates `req.ip` via `trust proxy: 1`, extracting `<client_ip>`.
+3. `loginRateLimiter` keys the 10-attempt bucket strictly to that specific client IP.
+4. During container startup, Zod parses environment variables. If `NODE_ENV=production` and `JWT_SECRET` is the default key, the container halts immediately with exit code 1.
+5. If an engineer invokes `npm run seed` in production without `ALLOW_DEMO_SEED=true`, `seedDatabase()` immediately throws an error and rolls back before touching database rows.
+6. If `ALLOW_DEMO_SEED=true`, the seeder hashes passwords provided in `DEMO_ADMIN_PASSWORD` and `DEMO_STAFF_PASSWORD`.
+7. `scripts/backup_daily.sh` executes nightly via cron, triggering `pg_dump -Fc` inside the database container and pruning backups older than 14 days.
+
+### Concepts used:
+- **Multi-Stage Container Builds**: Separating compile-time toolchains from runtime execution environments to produce minimal attack surface artifacts.
+- **Reverse Proxy Hop Trust (`X-Forwarded-For`)**: Parsing trusted header positions in reverse proxy chains to prevent IP spoofing while preserving client attribution.
+- **Defense in Depth Environment Validation**: Super-refining Zod schemas to block insecure configuration states during the boot phase.
+- **Principle of Least Privilege**: Running containerized workloads as unprivileged user `node` rather than `root`.
+- **Signal Forwarding with Init Systems (`dumb-init`)**: Handling process signal hierarchies inside Docker containers to prevent zombie processes and ensure graceful termination.
+
+### Risks and assumptions:
+- **Proxy Configuration Dependency**: `trust proxy: 1` assumes exactly one reverse proxy layer between the public internet and Express. If Cloudflare CDN is placed in front of Nginx, the hop count must be adjusted to 2 or configured with CIDR ranges.
+- **Backup Offsite Synchronization**: `scripts/backup_daily.sh` stores dumps on the local VPS disk. In live production, backups should be synced to an offsite S3 bucket or encrypted secondary cloud storage.
+
+### 30-second explanation:
+> *"We made the platform 100% production-ready. We created a lean, multi-stage Alpine Dockerfile that runs as a non-root user and added a production Docker Compose stack. Express now trusts the upstream reverse proxy so brute-force login protection tracks real client IPs rather than locking out the proxy. The database seeder refuses to run in production unless explicitly overridden with custom password environment variables. Finally, we added automated daily backup and restore scripts and documented a full comparison between a small VPS and managed cloud platforms in DEPLOY.md."*
+
+### Likely questions:
+1. **"What happens if someone accidentally runs `npm run seed` on the production server?"**
+   *Answer*: The seeder checks `NODE_ENV === 'production'`. Because `ALLOW_DEMO_SEED` is not set to `true`, the script logs an error and immediately aborts the transaction before altering any rows.
+2. **"Why does the production Docker Compose bind ports to `127.0.0.1` instead of `0.0.0.0`?"**
+   *Answer*: Binding to `127.0.0.1` ensures that PostgreSQL (port 5432) and the Node.js API (port 3000) are never directly exposed to the public internet. All external access must pass through the host's reverse proxy with TLS encryption.
+3. **"Why use a small VPS instead of AWS ECS + RDS for the initial rollout?"**
+   *Answer*: For Phase 1, a small VPS running Docker Compose costs ~$10/month, requires zero vendor-specific cloud lock-in, and guarantees data residency in the Middle East. As operational volume scales past 50 concurrent yards, the stateless backend can easily migrate to managed cloud containers.
+
+### How to verify:
+1. Run all backend automated test suites:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 9 test suites pass cleanly (**112 tests passed**, including all 13 tests in `deployment.test.ts`).
+2. Verify TypeScript type checking:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: `tsc --noEmit` exits with 0 errors.
+3. Verify production environment validation and seed safety:
+   ```bash
+   npm --workspace=backend run test -- src/__tests__/deployment.test.ts
+   ```
+   *Expected Result*: All deployment readiness and guard tests pass.

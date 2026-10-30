@@ -15,6 +15,16 @@ import { labelsRouter } from './routes/labelsRoutes.js';
 
 export const app = express();
 
+/**
+ * Trust immediate reverse proxy (Nginx, Caddy, Cloudflare, AWS ALB).
+ * WHY: When hosted behind a reverse proxy or load balancer in production,
+ * Express must trust the first upstream proxy hop (trust proxy: 1) so that
+ * req.ip and req.ips accurately resolve the real client IP from X-Forwarded-For,
+ * ensuring login rate limiters and audit loggers throttle individual clients rather
+ * than collapsing all traffic into the proxy's IP.
+ */
+app.set('trust proxy', 1);
+
 // Security headers
 app.use(helmet());
 
