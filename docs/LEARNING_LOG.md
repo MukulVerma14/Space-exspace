@@ -1367,3 +1367,74 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    npm --workspace=backend run test -- src/__tests__/deployment.test.ts
    ```
    *Expected Result*: All 19 deployment and security safeguard tests pass.
+
+---
+
+## Integration Review & Blocker Remediation
+
+### What we built:
+- **Comprehensive Post-Merge Integration Review**: Authored `docs/INTEGRATION_REVIEW.md` assessing Frontend vs Backend contract alignment, security practices, offline sync invariants, request leak risks, feature status for F1 through F-O4, and code hygiene.
+- **Real Sync Client Integration (`frontend/src/sync/syncClient.ts`)**: Removed mock `sendBatch` implementation and wired directly to `POST /api/sync`. Built payload mapper that transforms shorthand frontend actions (`move`, `return`, `send_to_repair`, etc.) to backend domain events (`equipment.move`, `equipment.return`, `equipment.repair`), embeds `asset_code` into payloads, and parses per-event statuses (`accepted`, `duplicate`, `rejected`).
+- **Client Clock Drift Compensation (`frontend/src/offline/clock.ts` & `outbox.ts`)**: Implemented client clock offset calibration $\Delta t = \text{server\_time} - \text{client\_now}$ in `frontend/src/offline/clock.ts`. Hooked automatic calibration into `api.request` via server HTTP `Date` response headers and `server_time` payloads, persisted the offset to `localStorage` for offline persistence, and applied the calibrated offset to all enqueued outbox events in `outbox.ts` to prevent `CLOCK_SKEW_EXCEEDED` rejection.
+- **Equipment Contract & Safe Error Propagation (`frontend/src/data/equipmentSource.ts` & `docs/API.md`)**: Aligned `docs/API.md` Endpoint 6 to document real backend response fields (`items`, `totalPages`, `hasNext`, `hasPrev`). Enhanced `equipmentSource.ts` to defensively accept both `items` and `data`, surface network errors to callers via `EquipmentResult.error`, and updated `EquipmentListPage.tsx` with contextual status notices differentiating true offline mode from server error fallbacks.
+- **Automated Frontend Unit Tests**: Added unit tests in `frontend/src/__tests__/` covering sync client batch translation (`syncClient.test.ts`), clock calibration and persistence (`clock.test.ts`), and live-to-snapshot fallback (`equipmentSource.test.ts`).
+
+### Why it exists:
+- **Client Reliability Invariant**: Field operations in Dammam yards and client sites occur under intermittent or absent network coverage. If the frontend mock remained disconnected, or if client clock drift caused the server to reject valid field transactions, technicians would accumulate unsyncable outbox data.
+- **Contract Integrity**: Discrepancies between `docs/API.md` and live controller responses cause silent failures or unhandled edge cases during deployment and multi-team collaboration.
+
+### Why this way:
+- **Automatic Header-Driven Clock Calibration instead of Manual Ping**:
+  - *Alternative 1 Rejected (Dedicated `/api/time` Heartbeat)*: Adds unnecessary network roundtrips and polling overhead on constrained mobile networks.
+  - *Chosen Approach*: Every standard response from Caddy or Express carries an RFC 7231 `Date` header or `server_time` field. Calibrating passively on every API call keeps the client clock synchronized at zero incremental network cost.
+- **Defensive Property Aliasing (`items` || `data`)**:
+  - *Alternative 2 Rejected (Strict Runtime Crash on Unexpected Root Key)*: If a server serializer or gateway adjusts key casing, failing immediately causes blank screens for field staff. Checking `res.items || res.data` provides graceful resilience.
+- **Preserving Rejected Events with Server Reason**:
+  - *Alternative 3 Rejected (Auto-Retrying Rejected Events on 400 Bad Request)*: A semantic business error (e.g. equipment already rented, asset already under repair) will never succeed on automatic retry; looping indefinitely exhausts device batteries. Events are flagged as `rejected` with the server's descriptive reason and surfaced to the technician with an explicit "Discard" option.
+
+### How it works:
+1. When any authenticated API request completes in `api/client.ts`, the client inspects the HTTP `Date` header or JSON `server_time` and invokes `calibrateClockFromServerTime()`.
+2. `clock.ts` calculates $\Delta t = \text{server\_time} - \text{Date.now()}` and stores it in memory and `localStorage.setItem('sx_clock_offset_ms', ...)`.
+3. When staff perform a yard action offline, `enqueueEvent()` in `outbox.ts` records `occurredAt = getCalibratedNowIso()`, adding the calibrated offset to the device's timestamp.
+4. When connectivity returns, `syncManager.ts` invokes `sendBatch()` in `syncClient.ts`.
+5. `sendBatch()` formats outbox items into `{ events: [...] }`, maps action types, and sends them to `POST /api/sync`.
+6. The backend processes events chronologically within isolated transactions; items matching server state within the 5-minute skew window succeed.
+7. `sendBatch()` reads the `results` array: items marked `accepted` or `duplicate` are purged from IndexedDB, while `rejected` events remain stored and display the rejection reason in the UI review badge.
+
+### Concepts used:
+- **Clock Drift Calibration**: Compensating for mobile client oscillator inaccuracy and time zone misconfigurations by tracking differential delta against authoritative server timestamps.
+- **Idempotent Batch Sync**: Utilizing client-generated UUIDs (`client_event_id`) to guarantee that retried batches never duplicate inventory or equipment movements.
+- **Degraded Read Cache (Stale-While-Revalidate Fallback)**: Serving read-only snapshots from local storage when network updates fail, with clear visual disclosure of staleness.
+- **Contract Testing**: Verifying that client serializers and network drivers conform to documented API boundary specifications.
+
+### Risks and assumptions:
+- **Assumption**: Client device clocks drift within reasonable bounds between calibrations (less than a few seconds per day), so an offset measured hours earlier remains within the 5-minute server window.
+- **Risk**: In a pure offline cold-start scenario on a brand-new device that has never connected to the server, the initial offset is 0. If the initial device time is severely wrong, events will be rejected on first sync until an initial ping calibrates the clock.
+
+### 30-second explanation:
+> *"During our post-merge integration review, we audited every frontend API call against our backend controllers and API documentation. We identified and immediately resolved three critical blockers: we replaced the offline sync mock with the real POST /api/sync contract, added automatic client clock skew calibration so field devices don't get rejected for future timestamps, and harmonized the equipment list response format while surfacing graceful fallback notices when live fetches fail. All 14 frontend unit tests pass, the production PWA builds cleanly, and all 121 backend tests pass."*
+
+### Likely questions:
+1. **"Why does the client need to calibrate its clock if the server records `recorded_at` anyway?"**
+   *Answer*: The server records `recorded_at` for audit logging, but the physical reality of yard operations is captured by `occurred_at` (e.g., when a crane was moved at an isolated port terminal hours before network signal was acquired). The server re-evaluates preconditions in physical sequence, but rejects events with future timestamps (> 5 minutes) to protect against forged timestamps. If a technician's phone clock is 10 minutes fast, uncalibrated events would be rejected.
+2. **"Why treat `status === 'duplicate'` as accepted in `syncClient.ts`?"**
+   *Answer*: In an unreliable network, a client might transmit a batch and the server processes it, but the HTTP response drops. When the client retries, the server identifies the event as already committed via `client_event_id` and returns `status: 'duplicate'`. From the client's perspective, the operation is complete and should be cleared from the pending outbox.
+3. **"Why does `equipmentSource.ts` fall back to a snapshot rather than displaying a blank error screen?"**
+   *Answer*: Equipment tracking is a critical field operation. If a technician is in a remote yard with intermittent connectivity, they must still be able to look up asset models, serial numbers, and equipment codes. Falling back to the latest cached snapshot with an informative warning keeps operations moving.
+
+### How to verify:
+1. Run all frontend unit tests:
+   ```bash
+   npx vitest run frontend
+   ```
+   *Expected Result*: All 3 test files pass (**14 tests passed**).
+2. Run frontend typecheck and production build:
+   ```bash
+   npm run build:frontend
+   ```
+   *Expected Result*: TypeScript typechecks and Vite PWA build succeed cleanly.
+3. Run backend test suite:
+   ```bash
+   npm run test:backend
+   ```
+   *Expected Result*: All 9 test files pass (**121 tests passed**).

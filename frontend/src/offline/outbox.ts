@@ -5,10 +5,12 @@
  * request is retried) and occurredAt (when it happened on the phone, not when it
  * reached the server).
  *
- * F-O3 only stores and lists events. Sending is F-O4.
+ * Client clock offset is applied to occurredAt to match server time and prevent
+ * rejection due to future clock skew (docs/API.md Endpoint 24).
  */
 
 import { getDb, OutboxEvent } from './db';
+import { getCalibratedNowIso } from './clock';
 
 export const OUTBOX_CHANGED_EVENT = 'sx-outbox-changed';
 
@@ -46,7 +48,7 @@ export async function enqueueEvent(input: NewEventInput): Promise<OutboxEvent> {
     type: input.type,
     assetCode: input.assetCode,
     payload: input.payload,
-    occurredAt: new Date().toISOString(),
+    occurredAt: getCalibratedNowIso(),
     status: 'pending',
     rejectReason: null,
     attempts: 0,

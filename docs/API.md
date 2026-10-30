@@ -179,7 +179,7 @@ Lists all standard commercial equipment rental rate cards. **Admin only.**
 #### Response (200 OK)
 ```json
 {
-  "data": [
+  "items": [
     {
       "model_id": 1,
       "make": "Tadano",
@@ -252,7 +252,7 @@ Lists the entire fleet from `v_equipment_current`.
 #### Response (200 OK)
 ```json
 {
-  "data": [
+  "items": [
     {
       "id": 1,
       "asset_code": "CRN-50-001",
@@ -273,7 +273,9 @@ Lists the entire fleet from `v_equipment_current`.
     "page": 1,
     "limit": 20,
     "total": 24,
-    "total_pages": 2
+    "totalPages": 2,
+    "hasNext": true,
+    "hasPrev": false
   }
 }
 ```

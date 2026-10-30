@@ -20,44 +20,61 @@ export interface EquipmentResult {
   items: MockEquipment[];
   source: DataSource;
   savedAt: string | null;
+  error?: string | null;
 }
 
 interface EquipmentPageResponse {
-  items: MockEquipment[];
-  pagination: { page: number; limit: number; total: number; totalPages: number; hasNext: boolean };
+  items?: MockEquipment[];
+  data?: MockEquipment[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages?: number;
+    total_pages?: number;
+    hasNext?: boolean;
+    hasPrev?: boolean;
+  };
 }
 
 const SNAPSHOT_NAME = 'equipment-list';
 const PAGE_SIZE = 100; // backend maximum
 const MAX_PAGES = 200; // safety guard: 20,000 items
 
-async function fetchLiveEquipment(): Promise<MockEquipment[]> {
+export async function fetchLiveEquipment(): Promise<MockEquipment[]> {
   const all: MockEquipment[] = [];
   for (let page = 1; page <= MAX_PAGES; page++) {
     const res = await api.get<EquipmentPageResponse>(
       `/api/equipment?page=${page}&limit=${PAGE_SIZE}`,
     );
-    all.push(...res.items);
-    if (!res.pagination.hasNext) return all;
+    const items = res.items || res.data || [];
+    all.push(...items);
+
+    const hasNext =
+      res.pagination.hasNext ??
+      (res.pagination.page < (res.pagination.totalPages ?? res.pagination.total_pages ?? 1));
+
+    if (!hasNext) return all;
   }
   throw new Error('Equipment list exceeded page guard');
 }
 
 export async function loadEquipment(userId: number): Promise<EquipmentResult> {
+  let fetchError: string | null = null;
+
   if (navigator.onLine) {
     try {
       const items = await fetchLiveEquipment();
       await saveSnapshot(userId, SNAPSHOT_NAME, items);
-      return { items, source: 'live', savedAt: new Date().toISOString() };
-    } catch {
-      // Network or server error mid-load: fall through to the snapshot.
-      // (401 handling is added in F-O4, where the sync manager stops and prompts re-login.)
+      return { items, source: 'live', savedAt: new Date().toISOString(), error: null };
+    } catch (err: unknown) {
+      fetchError = err instanceof Error ? err.message : 'Failed to fetch live equipment';
     }
   }
 
   const snap = await loadSnapshot<MockEquipment[]>(userId, SNAPSHOT_NAME);
   if (snap) {
-    return { items: snap.data, source: 'snapshot', savedAt: snap.savedAt };
+    return { items: snap.data, source: 'snapshot', savedAt: snap.savedAt, error: fetchError };
   }
-  return { items: [], source: 'none', savedAt: null };
+  return { items: [], source: 'none', savedAt: null, error: fetchError };
 }

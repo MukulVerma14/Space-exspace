@@ -62,6 +62,7 @@ export default function EquipmentListPage() {
   const [loading, setLoading] = useState(true);
   const [source, setSource] = useState<DataSource>('none');
   const [savedAt, setSavedAt] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -72,6 +73,7 @@ export default function EquipmentListPage() {
       setItems(res.items);
       setSource(res.source);
       setSavedAt(res.savedAt);
+      setError(res.error ?? null);
       setLoading(false);
     });
     return () => {
@@ -126,7 +128,9 @@ export default function EquipmentListPage() {
             color: 'var(--color-text-muted)',
           }}
         >
-          Offline. Showing saved data from {savedAt ? new Date(savedAt).toLocaleString() : 'earlier'}. Status may be out of date.
+          {error
+            ? `⚠️ Live update unavailable (${error}). Showing saved data from ${savedAt ? new Date(savedAt).toLocaleString() : 'earlier'}. Status may be out of date.`
+            : `Offline. Showing saved data from ${savedAt ? new Date(savedAt).toLocaleString() : 'earlier'}. Status may be out of date.`}
         </div>
       )}
       {source === 'none' && !loading && (
@@ -142,7 +146,9 @@ export default function EquipmentListPage() {
             color: 'var(--color-text-muted)',
           }}
         >
-          No saved data on this device yet. Connect to the internet once to load the fleet.
+          {error
+            ? `⚠️ Unable to load fleet: ${error}. Connect to the network and reload to fetch equipment data.`
+            : 'No saved data on this device yet. Connect to the internet once to load the fleet.'}
         </div>
       )}
 

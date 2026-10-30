@@ -12,6 +12,8 @@
  * server-side cookie setting support (see docs/OPEN_QUESTIONS.md).
  */
 
+import { calibrateClockFromServerTime } from '../offline/clock';
+
 const TOKEN_KEY = 'sx_token';
 
 // ─── Token helpers ────────────────────────────────────────────────────────────
@@ -82,6 +84,14 @@ async function request<T>(
     data = await res.json();
   } else {
     data = await res.text();
+  }
+
+  // Calibrate client clock offset from server Date header or response body server_time
+  const serverTimeHeader = res.headers.get('date');
+  if (serverTimeHeader) {
+    calibrateClockFromServerTime(serverTimeHeader);
+  } else if (typeof data === 'object' && data !== null && 'server_time' in data) {
+    calibrateClockFromServerTime(String((data as Record<string, unknown>).server_time));
   }
 
   if (!res.ok) {
