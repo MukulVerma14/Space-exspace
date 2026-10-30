@@ -28,6 +28,7 @@ export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY);
 }
 
+
 // ─── Core fetch wrapper ───────────────────────────────────────────────────────
 
 type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';

@@ -3,14 +3,14 @@
  *
  * Features:
  *   - Debounced text search (asset_code, make, model, type_name)
- *   - Status filter dropdown (all | available | rented | under_repair | inactive)
+ *   - Status filter dropdown (all | available | rented | under_repair) — matches API enum
  *   - Result count summary
  *   - Card grid layout (mobile-first, 1 col → 2 col → 3 col)
  *   - Loading skeleton (for when real API is connected)
  *   - Empty state
  *
  * DATA:
- *   Currently uses mock data from src/mocks/equipmentMock.ts.
+ *   loadEquipment() in src/data/equipmentSource.ts: live when online, saved snapshot when offline.
  *   To connect to the real API, replace the useMemo filter block with:
  *     const { data } = useSWR(`/api/equipment?search=${debouncedSearch}&status=${status}`, api.get)
  *   The card renders will be identical — mock shape matches the API shape.
@@ -21,10 +21,11 @@
  *   (Financial fields are absent from equipment list responses entirely.)
  */
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useDebounce } from '../../hooks/useDebounce';
+import { useAuth } from '../../context/AuthContext';
+import { loadEquipment, DataSource } from '../../data/equipmentSource';
 import {
-  MOCK_EQUIPMENT,
   MockEquipment,
   EquipmentStatus,
 } from '../../mocks/equipmentMock';
@@ -36,7 +37,6 @@ const STATUS_LABELS: Record<EquipmentStatus | 'all', string> = {
   available: 'Available',
   rented: 'Rented',
   under_repair: 'Under Repair',
-  inactive: 'Inactive',
 };
 
 const STATUS_OPTIONS = Object.entries(STATUS_LABELS) as [
@@ -47,10 +47,9 @@ const STATUS_OPTIONS = Object.entries(STATUS_LABELS) as [
 // ─── Condition config ──────────────────────────────────────────────────────────
 
 const CONDITION_COLOUR: Record<string, string> = {
-  excellent: 'var(--color-success)',
-  good:      'var(--color-primary)',
-  fair:      'var(--color-warning)',
-  poor:      'var(--color-danger)',
+  good:         'var(--color-primary)',
+  fair:         'var(--color-warning)',
+  needs_repair: 'var(--color-danger)',
 };
 
 // ─── Component ─────────────────────────────────────────────────────────────────
@@ -58,14 +57,33 @@ const CONDITION_COLOUR: Record<string, string> = {
 export default function EquipmentListPage() {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<EquipmentStatus | 'all'>('all');
-  // Simulate loading for 600ms on first mount to show skeleton
-  const [loading] = useState(false);
+  const { user } = useAuth();
+  const [items, setItems] = useState<MockEquipment[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [source, setSource] = useState<DataSource>('none');
+  const [savedAt, setSavedAt] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    setLoading(true);
+    loadEquipment(user.id).then((res) => {
+      if (cancelled) return;
+      setItems(res.items);
+      setSource(res.source);
+      setSavedAt(res.savedAt);
+      setLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
 
   const debouncedSearch = useDebounce(search, 300);
 
   const filtered = useMemo(() => {
     const q = debouncedSearch.toLowerCase().trim();
-    return MOCK_EQUIPMENT.filter((eq) => {
+    return items.filter((eq) => {
       const matchesSearch =
         !q ||
         eq.asset_code.toLowerCase().includes(q) ||
@@ -78,7 +96,7 @@ export default function EquipmentListPage() {
 
       return matchesSearch && matchesStatus;
     });
-  }, [debouncedSearch, statusFilter]);
+  }, [debouncedSearch, statusFilter, items]);
 
   return (
     <div className="animate-fade-up">
@@ -90,9 +108,43 @@ export default function EquipmentListPage() {
         <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }}>
           {loading
             ? 'Loading fleet…'
-            : `${filtered.length} of ${MOCK_EQUIPMENT.length} assets`}
+            : `${filtered.length} of ${items.length} assets`}
         </p>
       </div>
+
+      {/* ── Offline / no-data notices ── */}
+      {source === 'snapshot' && (
+        <div
+          role="status"
+          style={{
+            padding: 'var(--space-3)',
+            marginBottom: 'var(--space-4)',
+            borderRadius: 'var(--radius-md)',
+            background: 'var(--color-surface-2)',
+            border: '1px solid var(--color-border-subtle)',
+            fontSize: 'var(--text-sm)',
+            color: 'var(--color-text-muted)',
+          }}
+        >
+          Offline. Showing saved data from {savedAt ? new Date(savedAt).toLocaleString() : 'earlier'}. Status may be out of date.
+        </div>
+      )}
+      {source === 'none' && !loading && (
+        <div
+          role="status"
+          style={{
+            padding: 'var(--space-3)',
+            marginBottom: 'var(--space-4)',
+            borderRadius: 'var(--radius-md)',
+            background: 'var(--color-surface-2)',
+            border: '1px solid var(--color-border-subtle)',
+            fontSize: 'var(--text-sm)',
+            color: 'var(--color-text-muted)',
+          }}
+        >
+          No saved data on this device yet. Connect to the internet once to load the fleet.
+        </div>
+      )}
 
       {/* ── Filters Bar ── */}
       <div
@@ -139,7 +191,7 @@ export default function EquipmentListPage() {
       </div>
 
       {/* ── Status summary chips ── */}
-      <StatusSummaryBar data={MOCK_EQUIPMENT} activeFilter={statusFilter} onFilter={setStatusFilter} />
+      <StatusSummaryBar data={items} activeFilter={statusFilter} onFilter={setStatusFilter} />
 
       {/* ── Content ── */}
       {loading ? (
@@ -181,7 +233,6 @@ function StatusSummaryBar({
       available: 0,
       rented: 0,
       under_repair: 0,
-      inactive: 0,
     };
     data.forEach((eq) => c[eq.status]++);
     return c;
@@ -191,7 +242,6 @@ function StatusSummaryBar({
     { key: 'available',   label: 'Available',   cls: 'badge-available' },
     { key: 'rented',      label: 'Rented',      cls: 'badge-rented' },
     { key: 'under_repair',label: 'In Repair',   cls: 'badge-repair' },
-    { key: 'inactive',    label: 'Inactive',    cls: 'badge-inactive' },
   ];
 
   return (
@@ -237,14 +287,12 @@ function EquipmentCard({ equipment: eq }: { equipment: MockEquipment }) {
     available:   'badge-available',
     rented:      'badge-rented',
     under_repair:'badge-repair',
-    inactive:    'badge-inactive',
   };
 
   const statusLabel: Record<EquipmentStatus, string> = {
     available:    'Available',
     rented:       'Rented',
     under_repair: 'Under Repair',
-    inactive:     'Inactive',
   };
 
   const conditionColour = CONDITION_COLOUR[eq.condition] ?? 'var(--color-text-muted)';

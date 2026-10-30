@@ -1,26 +1,13 @@
 /**
- * AuthContext — global authentication state.
+ * AuthContext: global authentication state.
  *
- * WHY A CONTEXT:
- * Any component in the tree (nav bar, route guards, pages) needs to know
- * the current user and role.  Passing props down would be prop-drilling hell.
- * React Context is the idiomatic solution for "cross-cutting" state.
- *
- * /me CHECK ON LOAD:
- * On mount, if a token exists in localStorage we call GET /api/auth/me.
- * This validates the token is still accepted by the server (not expired,
- * user still active) and hydrates the user object without asking them to
- * log in again.  If /me returns 401, the stored token is cleared and the
- * user is sent to the login page.
+ * Offline:  the session survives. The profile comes from IndexedDB.
+ * 401:      the session is cleared and offline data is wiped.
+ * Logout:   token, profile and all snapshots are wiped (shared phones).
+ * Other user signs in: previous user's offline data is wiped first.
  */
 
-import React, {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useState,
-} from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import {
   ApiRequestError,
   clearToken,
@@ -29,6 +16,7 @@ import {
   meRequest,
   saveToken,
 } from '../api/client';
+import { clearAllOfflineData, loadProfile, saveProfile } from '../offline/db';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -44,19 +32,24 @@ export interface AuthUser {
 type AuthStatus = 'booting' | 'unauthenticated' | 'authenticated';
 
 interface AuthContextValue {
-  /** The resolved authentication state */
   status: AuthStatus;
-  /** Null until status === 'authenticated' */
   user: AuthUser | null;
-  /** Call with email + password. Throws ApiRequestError on failure. */
   login: (email: string, password: string) => Promise<void>;
-  /** Clears token + user, returns to unauthenticated */
-  logout: () => void;
+  logout: () => Promise<void>;
 }
 
 // ─── Context ──────────────────────────────────────────────────────────────────
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+
+/** Wipe offline data without blocking logout if the wipe fails. */
+async function wipeOfflineData(): Promise<void> {
+  try {
+    await clearAllOfflineData();
+  } catch (err) {
+    console.error('[auth] offline wipe failed', err);
+  }
+}
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
 
@@ -64,40 +57,69 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('booting');
   const [user, setUser] = useState<AuthUser | null>(null);
 
-  // On mount: if a token is stored, verify it with /me
   useEffect(() => {
-    const token = loadToken();
-    if (!token) {
-      setStatus('unauthenticated');
-      return;
-    }
+    let cancelled = false;
 
-    meRequest()
-      .then((res) => {
+    async function boot() {
+      const token = loadToken();
+      if (!token) {
+        setStatus('unauthenticated');
+        return;
+      }
+
+      try {
+        const res = await meRequest();
+        await saveProfile(res.user);
+        if (cancelled) return;
         setUser(res.user);
         setStatus('authenticated');
-      })
-      .catch((err: unknown) => {
-        // 401 = expired or revoked — clear and go to login
+      } catch (err: unknown) {
+        if (cancelled) return;
+
+        // Server rejected the token: clear everything.
         if (err instanceof ApiRequestError && err.status === 401) {
           clearToken();
+          await wipeOfflineData();
+          setStatus('unauthenticated');
+          return;
         }
-        // Any other network error (backend down, etc.) — still clear session
-        // so the user can log in fresh when the server is back.
-        clearToken();
-        setStatus('unauthenticated');
-      });
+
+        // Offline or 5xx: keep the session and boot from the saved profile.
+        const cached = await loadProfile<AuthUser>();
+        if (cancelled) return;
+        if (cached) {
+          setUser(cached);
+          setStatus('authenticated');
+        } else {
+          setStatus('unauthenticated');
+        }
+      }
+    }
+
+    boot();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const login = useCallback(async (email: string, password: string) => {
     const res = await loginRequest(email, password);
     saveToken(res.token);
+
+    // Different person on the same phone: don't let them see the last user's data.
+    const previous = await loadProfile<AuthUser>();
+    if (previous && previous.id !== res.user.id) {
+      await wipeOfflineData();
+    }
+
+    await saveProfile(res.user);
     setUser(res.user);
     setStatus('authenticated');
   }, []);
 
-  const logout = useCallback(() => {
+  const logout = useCallback(async () => {
     clearToken();
+    await wipeOfflineData();
     setUser(null);
     setStatus('unauthenticated');
   }, []);

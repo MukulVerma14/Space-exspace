@@ -13,9 +13,13 @@
  * A sidebar can be added for desktop breakpoints in a later step.
  */
 
+import { useEffect } from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { OnlineStatusBadge } from '../../components/OnlineStatusBadge';
+import { OutboxBadge } from '../../components/OutboxBadge';
+import { clearOutboxForUser, listEvents } from '../../offline/outbox';
+import { startOnlineSync } from '../../sync/syncManager';
 
 function getInitials(name: string): string {
   return name
@@ -29,10 +33,26 @@ export default function AppLayout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
 
-  function handleLogout() {
-    logout();
+  async function handleLogout() {
+    if (user) {
+      const unsent = await listEvents(user.id);
+      if (unsent.length > 0) {
+        const ok = window.confirm(
+          `${unsent.length} change(s) are not sent yet. Signing out deletes them. Sign out anyway?`,
+        );
+        if (!ok) return;
+        await clearOutboxForUser(user.id);
+      }
+    }
+    await logout(); // wipes token, profile and snapshots
     navigate('/login', { replace: true });
   }
+
+  // Sync triggers: app start (if online), browser 'online' event. No polling.
+  useEffect(() => {
+    if (!user) return;
+    return startOnlineSync(user.id);
+  }, [user]);
 
   if (!user) return null;
 
@@ -81,6 +101,9 @@ export default function AppLayout() {
 
         {/* Online/offline badge */}
         <OnlineStatusBadge />
+
+        {/* Unsent staff actions */}
+        <OutboxBadge />
 
         {/* User area */}
         <div className="top-nav-user">

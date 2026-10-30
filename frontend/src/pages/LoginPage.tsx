@@ -248,7 +248,8 @@ export default function LoginPage() {
           </button>
         </form>
 
-        {/* Demo hint */}
+        {/* Demo hint — dev builds only, so demo passwords never ship to production */}
+        {import.meta.env.DEV && (
         <div
           style={{
             marginTop: 'var(--space-6)',
@@ -274,6 +275,7 @@ export default function LoginPage() {
             />
           </div>
         </div>
+        )}
       </div>
     </div>
   );

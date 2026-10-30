@@ -8,7 +8,7 @@
  * "Offline" persists — the user must know they are working offline.
  *
  * WHY SHOW AT ALL:
- * ADR 006 describes field technicians on construction sites and port terminals.
+ * The client brief describes field technicians on construction sites and port terminals.
  * They may lose signal mid-task. Without a visible indicator they might submit
  * actions believing they went to the server, when in fact they were queued.
  * The badge is the contract between the app and the user: "I know you're
@@ -16,7 +16,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { useOnlineStatus } from '../../hooks/useOnlineStatus';
+import { useOnlineStatus } from '../hooks/useOnlineStatus';
 
 export function OnlineStatusBadge() {
   const online = useOnlineStatus();

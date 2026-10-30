@@ -10,8 +10,8 @@
  * EquipmentListPage with: api.get(`/api/equipment?search=${q}&status=${status}`)
  */
 
-export type EquipmentStatus = 'available' | 'rented' | 'under_repair' | 'inactive';
-export type EquipmentCondition = 'excellent' | 'good' | 'fair' | 'poor';
+export type EquipmentStatus = 'available' | 'rented' | 'under_repair';
+export type EquipmentCondition = 'good' | 'fair' | 'needs_repair';
 
 export interface MockEquipment {
   id: number;
@@ -48,7 +48,7 @@ export const MOCK_EQUIPMENT: MockEquipment[] = [
     model: 'LTM 1080-1',
     type_name: 'Hydraulic Mobile Crane',
     serial_no: 'LBH-LTM80-2020-004',
-    condition: 'excellent',
+    condition: 'good',
     status: 'available',
     current_location_name: 'Dammam Main Yard',
     current_location_kind: 'yard',
@@ -87,7 +87,7 @@ export const MOCK_EQUIPMENT: MockEquipment[] = [
     model: 'HC-10',
     type_name: 'Heavy Container',
     serial_no: 'THU-HC10-2020-007',
-    condition: 'excellent',
+    condition: 'good',
     status: 'available',
     current_location_name: 'Dammam Main Yard',
     current_location_kind: 'yard',
@@ -113,7 +113,7 @@ export const MOCK_EQUIPMENT: MockEquipment[] = [
     model: 'A120',
     type_name: 'Portable Site Office',
     serial_no: 'ALG-A120-2021-004',
-    condition: 'excellent',
+    condition: 'good',
     status: 'available',
     current_location_name: 'Dammam Main Yard',
     current_location_kind: 'yard',
@@ -126,7 +126,7 @@ export const MOCK_EQUIPMENT: MockEquipment[] = [
     model: 'XQ250',
     type_name: 'Diesel Generator',
     serial_no: 'CAT-XQ250-2022-018',
-    condition: 'excellent',
+    condition: 'good',
     status: 'rented',
     current_location_name: 'King Salman Port Terminal Site',
     current_location_kind: 'client_site',
@@ -152,7 +152,7 @@ export const MOCK_EQUIPMENT: MockEquipment[] = [
     model: 'HD 13/35-4',
     type_name: 'High Pressure Cleaner',
     serial_no: 'KAR-HD1335-2023-001',
-    condition: 'excellent',
+    condition: 'good',
     status: 'available',
     current_location_name: 'Dammam Main Yard',
     current_location_kind: 'yard',
@@ -165,23 +165,10 @@ export const MOCK_EQUIPMENT: MockEquipment[] = [
     model: 'LTM 1025',
     type_name: 'Hydraulic Mobile Crane',
     serial_no: 'LBH-LTM25-2018-009',
-    condition: 'poor',
+    condition: 'needs_repair',
     status: 'under_repair',
     current_location_name: 'Al-Khobar Workshop',
     current_location_kind: 'workshop',
     active: true,
-  },
-  {
-    id: 12,
-    asset_code: 'GEN-500-001',
-    make: 'Caterpillar',
-    model: 'XQ500',
-    type_name: 'Diesel Generator',
-    serial_no: 'CAT-XQ500-2021-005',
-    condition: 'good',
-    status: 'inactive',
-    current_location_name: null,
-    current_location_kind: null,
-    active: false,
   },
 ];
