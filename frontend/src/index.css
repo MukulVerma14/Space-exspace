@@ -1,6 +1,6 @@
 /* ============================================================
    SPACE EXSPACE — Global Design System
-   Mobile-first, dark-mode-first
+   Mobile-first. Theme matches space-exs.com (ivory, gold, charcoal)
    ============================================================ */
 
 /* --- Google Fonts are loaded in index.html --- */
@@ -8,38 +8,39 @@
 /* ---- CSS Custom Properties (Design Tokens) ---- */
 :root {
   /* Colors */
-  --color-bg:           #0f1117;
-  --color-surface:      #181c27;
-  --color-surface-2:    #1e2335;
-  --color-border:       #2a3050;
-  --color-border-subtle:#1e2335;
+  --color-bg:           #ffe3a2;
+  --color-surface:      #FFFFFF;
+  --color-surface-2:    #F6F4EA;
+  --color-border:       #D3B678;
+  --color-border-subtle:#EFE8D2;
 
-  --color-primary:      #4f8ef7;
-  --color-primary-dim:  #2d5cbf;
-  --color-primary-glow: rgba(79, 142, 247, 0.18);
+  --color-primary:      #8A6914;
+  --color-primary-dim:  #6B5210;
+  --color-primary-glow: rgba(200, 169, 111, 0.25);
 
-  --color-text:         #e8eaf0;
-  --color-text-muted:   #7b84a0;
-  --color-text-subtle:  #4a5275;
+  --color-text:         #0A0A0A;
+  --color-text-muted:   #493E27;
+  --color-text-subtle:  #8C7F5E;
 
-  --color-success:      #34d399;
-  --color-success-dim:  rgba(52, 211, 153, 0.15);
-  --color-warning:      #fbbf24;
-  --color-warning-dim:  rgba(251, 191, 36, 0.15);
-  --color-danger:       #f87171;
-  --color-danger-dim:   rgba(248, 113, 113, 0.15);
-  --color-info:         #60a5fa;
-  --color-info-dim:     rgba(96, 165, 250, 0.15);
+  --color-success:      #059669;
+  --color-success-dim:  rgba(16, 183, 127, 0.15);
+  --color-warning:      #B45309;
+  --color-warning-dim:  rgba(245, 159, 10, 0.18);
+  --color-danger:       #DC2626;
+  --color-danger-dim:   rgba(239, 67, 67, 0.12);
+  --color-info:         #2563EB;
+  --color-info-dim:     rgba(59, 130, 246, 0.12);
 
   /* Status badge colors */
-  --status-available:   #34d399;
-  --status-rented:      #fbbf24;
-  --status-repair:      #f87171;
-  --status-inactive:    #4a5275;
+  --status-available:   #059669;
+  --status-rented:      #B45309;
+  --status-repair:      #DC2626;
+  --status-inactive:    #8C7F5E;
 
   /* Typography */
-  --font-sans:   'Inter', system-ui, -apple-system, sans-serif;
-  --font-mono:   'JetBrains Mono', 'Fira Code', monospace;
+  --font-sans:   'Source Sans 3', system-ui, -apple-system, sans-serif;
+  --font-heading: 'Barlow Condensed', system-ui, -apple-system, sans-serif;
+  --font-mono:   'JetBrains Mono', ui-monospace, 'Fira Code', monospace;
 
   --text-xs:  0.75rem;
   --text-sm:  0.875rem;
@@ -69,10 +70,10 @@
   --radius-full:9999px;
 
   /* Shadows */
-  --shadow-sm:  0 1px 3px rgba(0,0,0,0.4);
-  --shadow-md:  0 4px 16px rgba(0,0,0,0.5);
-  --shadow-lg:  0 8px 32px rgba(0,0,0,0.6);
-  --shadow-glow:0 0 24px rgba(79, 142, 247, 0.25);
+  --shadow-sm:  0 1px 2px rgba(10,10,10,0.06);
+  --shadow-md:  0 4px 12px rgba(10,10,10,0.08);
+  --shadow-lg:  0 8px 24px rgba(10,10,10,0.12);
+  --shadow-glow:0 0 0 3px rgba(200, 169, 111, 0.35);
 
   /* Transitions */
   --transition-fast: 120ms ease;
@@ -316,7 +317,7 @@ input, select, textarea { font-family: inherit; }
 .top-nav-logo {
   width: 30px;
   height: 30px;
-  background: linear-gradient(135deg, var(--color-primary), #7c3aed);
+  background: linear-gradient(135deg, var(--color-primary), var(--color-primary-dim));
   border-radius: var(--radius-sm);
   display: flex;
   align-items: center;
@@ -370,14 +371,14 @@ input, select, textarea { font-family: inherit; }
   letter-spacing: 0.05em;
 }
 .role-tag-admin {
-  background: rgba(124, 58, 237, 0.2);
-  color: #a78bfa;
-  border: 1px solid rgba(124, 58, 237, 0.3);
+  background: rgba(200, 169, 111, 0.15);
+  color: #E0C58F;
+  border: 1px solid rgba(200, 169, 111, 0.5);
 }
 .role-tag-staff {
-  background: var(--color-info-dim);
-  color: var(--color-info);
-  border: 1px solid rgba(96, 165, 250, 0.3);
+  background: rgba(200, 169, 111, 0.15);
+  color: #E0C58F;
+  border: 1px solid rgba(200, 169, 111, 0.5);
 }
 
 .page-content {
@@ -506,4 +507,32 @@ input, select, textarea { font-family: inherit; }
 @media (min-width: 768px) {
   .top-nav-title { font-size: var(--text-base); }
   .top-nav-subtitle { display: inline; }
+}
+
+/* ---- Brand headings (space-exs.com uses Barlow Condensed for headings) ---- */
+h1, h2, h3, h4 {
+  font-family: var(--font-heading);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+/* Header text: light, because the header background is dark */
+.top-nav,
+.top-nav a,
+.top-nav button,
+.top-nav-title {
+  color: #FFFFF0;
+}
+
+.top-nav-subtitle {
+  color: #CFC6A8;
+}
+
+.top-nav a.active {
+  color: #C8A96F;
+}
+
+.top-nav .user-avatar {
+  color: #FFFFF0;
+  background: #8A6914;
 }

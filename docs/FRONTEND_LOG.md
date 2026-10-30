@@ -482,3 +482,52 @@ Run the dev server (`npx vite`, port 5173) so the test buttons are visible. Log 
 ### 30-Second Explanation
 
 > Queued actions are sent to the server in small batches when the phone is online. If the connection drops, it retries with increasing waits, not every second. If the server says a session has expired, sending stops and the person is asked to sign in again. Nothing is sent while offline, and the phone doesn't poll the server when idle. The server side is still a mock until the backend ignores duplicate events.
+
+---
+
+## UI-1 — Visual Theme Matched to space-exs.com
+
+**Scope:** colours, fonts and styling only. No logic, routes, API calls or offline behaviour were changed.
+
+### What Changed
+
+| File | Change |
+|---|---|
+| `src/index.css` | Design tokens replaced with the site palette: ivory background, white cards, gold and bronze accents, charcoal text. Fonts set to Barlow Condensed (headings) and Source Sans 3 (body). Purple accents removed. Shadows lightened. |
+| `index.html` | Google Fonts link now loads Barlow Condensed, Source Sans 3 and JetBrains Mono. Theme colour updated. |
+| `src/pages/LoginPage.tsx` | Logo gradient uses the brand colours (was purple). |
+
+### Palette Used (converted from the site's stylesheet)
+
+| Role | Hex |
+|---|---|
+| Background | `#FFFFF0` |
+| Surface (cards) | `#FFFFFF` |
+| Border | `#D3B678` |
+| Primary (buttons, links) | `#8A6914` (darker gold, for readable white text) |
+| Text | `#0A0A0A` |
+| Muted text | `#493E27` |
+| Success / Warning / Danger | `#059669` / `#B45309` / `#DC2626` |
+
+### Why some colours differ from the site
+The site's brand gold (`#C8A96F`) and amber (`#F59F0A`) don't have enough contrast for text on a light background. The darker shades keep the same hue and make the text readable, especially outdoors in sunlight on a phone. Confirm with the client if they want the exact brand colours anyway.
+
+### Not Changed
+- Logo: still the "SX" badge. The official horizontal logo file is needed to replace it.
+- Dark theme: removed in favour of the site's light theme.
+
+### How to Test
+```powershell
+cd frontend
+npx vite build
+npx vite preview
+```
+| Check | Expected |
+|---|---|
+| Login page | Ivory background, gold "SX" badge, Barlow Condensed heading |
+| Equipment list | White cards, gold-tinted borders, readable status badges |
+| Admin role tag | Gold tint, not purple |
+| All earlier tests (F-O1 to F-O4) | Still pass. Nothing functional changed |
+
+### 30-Second Explanation
+> The app now uses the same colours and fonts as the company website: ivory background, gold accents and the same heading font. Only the look changed. The behaviour, offline support and sync work exactly as before.
