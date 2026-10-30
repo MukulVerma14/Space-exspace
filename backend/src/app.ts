@@ -11,6 +11,7 @@ import rentalsRouter from './routes/rentalsRoutes.js';
 import materialsRouter from './routes/materialsRoutes.js';
 import invoicesRouter from './routes/invoicesRoutes.js';
 import { syncRouter } from './routes/syncRoutes.js';
+import { labelsRouter } from './routes/labelsRoutes.js';
 
 export const app = express();
 
@@ -64,6 +65,9 @@ app.use('/api/rates', ratesRouter);
 
 // Equipment & QR tracking routes
 app.use('/api/equipment', equipmentRouter);
+
+// Equipment QR printable labels routes
+app.use('/api/labels', labelsRouter);
 
 // Rentals management routes
 app.use('/api/rentals', rentalsRouter);

@@ -49,6 +49,7 @@ This document provides a comprehensive specification of every REST API endpoint 
 | `POST` | [`/api/invoices/supplier`](#23-post-apiinvoicessupplier) | Admin Only (`role: 'admin'`) | Record received supplier invoice & auto-update material price history |
 | `GET` | [`/api/sync/snapshot`](#24-get-apisyncsnapshot) | Authenticated (`admin`, `staff`) | Fetch offline read snapshot (ETag conditional caching, role-filtered) |
 | `POST` | [`/api/sync`](#25-post-apisync) | Authenticated (`admin`, `staff`) | Replay offline event batches (idempotent UUIDs, row-locked trigger guards) |
+| `GET` | [`/api/labels/sheet`](#26-get-apilabelssheet) | Authenticated (`admin`, `staff`) | Printable A4 PDF/HTML grid of equipment QR labels (error correction H, plain asset code payload) |
 
 ---
 
@@ -1033,3 +1034,92 @@ When re-submitting an already processed `client_event_id`:
 | `LOCATION_NOT_FOUND` | Destination `location_id` does not exist | Invalid location selected |
 | `ITEM_NOT_FOUND` | Material `item_id` not found or deactivated | Invalid material SKU |
 | `UNSUPPORTED_EVENT_TYPE` | Event type not in scope for offline sync | Administrative or financial event attempted offline |
+
+
+---
+
+### 26. `GET /api/labels/sheet`
+
+Generates a printable A4 HTML sheet or JSON feed of equipment QR labels.
+
+- **Method**: `GET`
+- **Path**: `/api/labels/sheet`
+- **Auth Required**: `Bearer <token>` (`admin` or `staff`)
+- **Query Parameters**:
+  - `assetCodes`: Comma-separated list or array of asset codes (e.g. `CRN-50-001,GEN-250-001`).
+  - `type_id`: Filter by equipment type ID (integer).
+  - `type`: Filter by equipment type name (case-insensitive substring, e.g. `Crane`).
+  - `status`: Filter by status (`available`, `rented`, `under_repair`).
+  - `location_id`: Filter by current yard/site location ID (integer).
+  - `limit`: Maximum number of labels to return (integer, default 50, maximum hard cap 50).
+  - `format`: `html` (default, printable A4 grid) or `json`.
+
+#### Architectural Invariants:
+1. **Plain Text Natural Key Payload**: The QR code encodes strictly the natural `asset_code` (e.g. `CRN-50-001`). No URLs, protocols, or hostnames are included. Survives domain name migrations, routing re-architectures, and intranet shifts permanently (see [ADR 012](decisions/012-plain-text-qr-payload-and-high-error-correction.md)).
+2. **Error Correction Level H**: Encoded using ISO/IEC 18004 High error correction (~30% recovery capability), ensuring outdoor equipment tags scratched by rigging wire or stained with oil remain 100% readable.
+3. **Strict Zero-Money Invariant**: Completely strips and omits all financial data (no rental rates, costs, replacement values, prices, or tax fields). Safe for public/jobsite field tagging.
+4. **Hard Cap of 50 Labels**: Enforces a strict maximum of 50 labels per sheet request to avoid server-side rendering denial-of-service and fit standard multi-page A4 print batches.
+
+#### Responses
+
+##### Printable A4 HTML Response (`format=html` or default browser navigation)
+- **Status**: `200 OK`
+- **Content-Type**: `text/html; charset=utf-8`
+- **Body**: Complete self-contained HTML document formatted with `@page { size: A4 portrait; margin: 10mm; }`, `@media print`, 2-column grid layout, high-DPI QR PNG data URLs, bold monospace asset codes, and technical model/type specifications.
+
+##### JSON Response (`format=json` or `Accept: application/json`)
+- **Status**: `200 OK`
+- **Content-Type**: `application/json`
+- **Body**:
+```json
+{
+  "count": 2,
+  "labels": [
+    {
+      "asset_code": "CRN-50-001",
+      "serial_no": "TD-500-9841",
+      "make": "Tadano",
+      "model": "GR-500EX",
+      "type_name": "Rough Terrain Crane",
+      "capacity_value": "50.00",
+      "capacity_unit": "ton",
+      "current_location_name": "Dammam Central Yard",
+      "qr_data_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAQAAAAEAAQMAAABbVsRNAAAABlBMVEX///8AAABVwtN+AA..."
+    },
+    {
+      "asset_code": "GEN-250-001",
+      "serial_no": "CU-250-3312",
+      "make": "Cummins",
+      "model": "C250D5",
+      "type_name": "Diesel Generator",
+      "capacity_value": "250.00",
+      "capacity_unit": "kVA",
+      "current_location_name": "Dammam Central Yard",
+      "qr_data_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAQAAAAEAAQMAAABbVsRNAAAABlBMVEX///8AAABVwtN+AA..."
+    }
+  ]
+}
+```
+
+##### Error Responses
+- **400 Bad Request** (Exceeds hard cap of 50 labels):
+```json
+{
+  "error": "Label limit exceeded",
+  "message": "Requested 55 asset codes exceeds the hard cap of 50 labels per sheet"
+}
+```
+- **400 Bad Request** (Missing both assetCodes and filter criteria):
+```json
+{
+  "error": "Invalid request",
+  "message": "Must provide either assetCodes or filter criteria (type_id, type, status, location_id)"
+}
+```
+- **404 Not Found** (Unknown or missing asset code):
+```json
+{
+  "error": "Equipment not found",
+  "message": "One or more requested asset codes do not exist: UNKNOWN-999"
+}
+```
