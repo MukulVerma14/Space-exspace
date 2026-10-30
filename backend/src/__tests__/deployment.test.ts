@@ -8,7 +8,7 @@ import { pool } from '../db/pool.js';
 import * as poolModule from '../db/pool.js';
 import bcrypt from 'bcrypt';
 
-describe('Step 6b: Production Deployment Readiness & Operational Safeguards', () => {
+describe('Step 6b & 6c: Production Deployment Readiness & Operational Safeguards', () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
@@ -30,7 +30,7 @@ describe('Step 6b: Production Deployment Readiness & Operational Safeguards', ()
     it('resolves real client IP from X-Forwarded-For header when trust proxy: 1 is active', async () => {
       const clientIp = '203.0.113.195';
 
-      // Reverse proxy (e.g. Nginx) forwards the client IP in X-Forwarded-For
+      // Reverse proxy (e.g. Caddy / Nginx) forwards the client IP in X-Forwarded-For
       const testApp = express();
       testApp.set('trust proxy', 1);
       testApp.get('/api/test-ip', (req, res) => {
@@ -134,6 +134,21 @@ describe('Step 6b: Production Deployment Readiness & Operational Safeguards', ()
       JWT_SECRET: 'a_very_strong_production_secret_key_exceeding_32_characters_long',
     };
 
+    it('rejects JWT_SECRET shorter than 32 characters when NODE_ENV=production', () => {
+      const shortSecretConfig = {
+        ...validBaseConfig,
+        NODE_ENV: 'production',
+        JWT_SECRET: 'short_secret_only_24_chars!', // 27 characters < 32
+      };
+
+      const result = envSchema.safeParse(shortSecretConfig);
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        const issues = result.error.issues;
+        expect(issues.some((i) => i.message.includes('JWT_SECRET must be at least 32 characters in production'))).toBe(true);
+      }
+    });
+
     it('rejects default dev JWT_SECRET when NODE_ENV=production', () => {
       const prodConfig = {
         ...validBaseConfig,
@@ -178,10 +193,10 @@ describe('Step 6b: Production Deployment Readiness & Operational Safeguards', ()
       expect(result.success).toBe(true);
     });
 
-    it('allows default dev secrets when NODE_ENV=development', () => {
+    it('allows shorter dev secrets when NODE_ENV=development', () => {
       const devConfig = {
         NODE_ENV: 'development',
-        JWT_SECRET: 'dev_jwt_secret_must_be_changed_in_production_min32chars',
+        JWT_SECRET: 'short_dev_secret',
       };
 
       const result = envSchema.safeParse(devConfig);

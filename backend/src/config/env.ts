@@ -23,8 +23,7 @@ export const envSchema = z
     DB_NAME: z.string().min(1).default('space_exspace'),
 
     // JWT Configuration
-    // Enforcing min 32 chars prevents accidental use of weak, bruteforce-susceptible secrets
-    JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters for security'),
+    JWT_SECRET: z.string().min(1, 'JWT_SECRET is required'),
     JWT_EXPIRES_IN: z.string().default('8h'),
 
     // CORS Configuration (strictly loaded from environment)
@@ -38,6 +37,14 @@ export const envSchema = z
   .superRefine((data, ctx) => {
     // Production security invariants
     if (data.NODE_ENV === 'production') {
+      if (!data.JWT_SECRET || data.JWT_SECRET.length < 32) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'JWT_SECRET must be at least 32 characters in production',
+          path: ['JWT_SECRET'],
+        });
+      }
+
       if (data.JWT_SECRET === 'dev_jwt_secret_must_be_changed_in_production_min32chars') {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,

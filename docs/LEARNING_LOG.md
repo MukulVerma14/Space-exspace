@@ -1179,3 +1179,97 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    npm --workspace=backend run test -- src/__tests__/deployment.test.ts
    ```
    *Expected Result*: All deployment readiness and guard tests pass.
+
+---
+
+## Step 6c: Demo Hosting Hardening, Caddy Automated HTTPS, Same-Origin SPA Delivery, Mobile Camera Secure Context, and Off-Site S3 Replication
+
+### What we built:
+1. **Caddy Edge Ingress & Automated HTTPS (`Caddyfile` & `docker-compose.prod.yml`)**:
+   - Integrated Caddy v2 as the public ingress reverse proxy handling ports 80, 443, and 443/UDP (HTTP/3 QUIC).
+   - Configured automatic TLS certificate provisioning and maintenance via Let's Encrypt / ZeroSSL.
+   - Configured streaming compression (`zstd` and `gzip`) for API responses and static web bundles.
+   - Applied production security headers: `Strict-Transport-Security` (HSTS), `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy: strict-origin-when-cross-origin`, and `Permissions-Policy: camera=(self)`.
+2. **Same-Origin SPA & API Architecture**:
+   - Caddy serves compiled React frontend static files from `/srv` (`try_files {path} /index.html`) while proxying `/api/*` and `/health` requests to `backend:3000`.
+   - Eliminated Cross-Origin Resource Sharing (CORS) preflight requests, cookie restrictions, and credential-blocking across separate ports or domains.
+3. **Mobile Camera QR Scanner HTTPS Compliance (Secure Context)**:
+   - Codified and documented the W3C Secure Context requirement: mobile browsers (iOS Safari, Android Chrome) strictly block `navigator.mediaDevices.getUserMedia` when accessed over plain HTTP. Automated TLS via Caddy guarantees that yard technicians can scan equipment QR labels without browser sandbox permission failures.
+4. **Proxy Hop Trust Rationale (`app.set('trust proxy', 1)`)**:
+   - Documented in `docs/DEPLOY.md` why trusting exactly 1 upstream proxy hop aligns with Caddy's position as the direct ingress proxy.
+   - Documented that if an upstream CDN (e.g. Cloudflare, AWS CloudFront) is layered in front of Caddy, the hop count must be adjusted to 2 or configured with trusted CIDR blocks to preserve client IP isolation in `loginRateLimiter`.
+5. **Off-Site Database Replication via `rclone` with Loud Failure (`scripts/backup_daily.sh`)**:
+   - Integrated off-site replication to an S3-compatible bucket (`rclone copyto`) following non-blocking `pg_dump -Fc`.
+   - Built to **fail loudly**: exits with code 10 if `rclone` is missing, and code 20 if the cloud upload fails, ensuring ops alerts and cron error logs fire immediately rather than failing silently.
+6. **Monthly Disaster Recovery Restore Test Checklist (`docs/DEPLOY.md`)**:
+   - Added a mandatory monthly operational checklist reminding operators to test restoration of off-site dumps against clean target databases and verify row counts and derived view `v_equipment_current` queries.
+7. **Strict Production Environment Validation**:
+   - Enforced that `JWT_SECRET` must be strictly ≥ 32 characters in `NODE_ENV=production` within `backend/src/config/env.ts`.
+   - Added automated test cases in `backend/src/__tests__/deployment.test.ts` verifying that short secrets (< 32 chars) are rejected in production while allowed in development.
+8. **Client Unanswered Questions & Cost Annotations**:
+   - Updated `docs/OPEN_QUESTIONS.md` with questions 11–14 (DNS delegation, S3 backup credentials, barcode scanner hardware vs mobile camera, and KSA data residency).
+   - Annotated all pricing figures and data residency statements in `docs/DEPLOY.md` with `"(to verify before quoting)"`.
+9. **ADR 014**:
+   - Published [ADR 014: Caddy Edge Reverse Proxy, Same-Origin Architecture, Mobile Camera Secure Context, and Off-Site S3 Backups](decisions/014-caddy-reverse-proxy-same-origin-and-offsite-backup.md).
+
+### Why it exists:
+- **Zero-Friction Client Deployment**: Separate frontend and backend origins create persistent CORS bugs, preflight latency on mobile 4G networks, and cookie isolation issues. Delivering both from the same origin under Caddy simplifies deployment to a single domain.
+- **Hardware Access Enforcement**: Scanning equipment QR codes in outdoor yards requires HTML5 camera access. Browsers silently disable camera APIs on plain HTTP origins; automatic HTTPS solves this without manual certificate renewal maintenance.
+- **Catastrophic Hardware Outage Recovery**: Backups stored solely on the host VPS are destroyed if the VPS disk or hypervisor fails. Automated off-site S3 replication with loud failure ensures backups survive server destruction.
+- **Rate-Limiter Attribution**: Without documented hop counts, misconfigured reverse proxy trust collapses all users into a single IP, allowing one rogue client to lock out an entire company from the API.
+
+### Why this way:
+- **Caddy over Nginx + Certbot**:
+  - *Alternative 1 Rejected (Nginx with external Certbot container)*: Requires managing cron renewal hooks, volume sharing for webroot ACME challenges, and signal reloads. Caddy natively automates ACME certificate issuance, renewal, and OCSP stapling in-memory.
+- **Loud Backup Failures over Silent Degradation**:
+  - *Alternative 2 Rejected (Logging a warning and exiting 0 when S3 copy fails)*: Backup failures that exit 0 do not trigger cron email alerts or monitoring pagers. Exiting with non-zero codes (10 and 20) ensures automated visibility.
+- **Single-Origin over Cross-Domain API (`api.domain.com`)**:
+  - *Alternative 3 Rejected (Deploying API on a subdomain with wildcard CORS)*: Subdomains require separate TLS certificates, double the DNS configuration, and force mobile browsers to execute preflight `OPTIONS` requests before every POST/PATCH action.
+
+### How it works:
+1. When public HTTPS traffic hits port 443, Caddy terminates TLS using its automated Let's Encrypt / ZeroSSL certificate.
+2. If the request path begins with `/api/*` or matches `/health`, Caddy proxies it to `backend:3000` inside the internal Docker bridge network, setting `X-Forwarded-For: {remote_host}`.
+3. Express processes `/api/*` requests, resolves `req.ip` via `trust proxy: 1`, applies rate-limiting per client IP, and returns JSON responses.
+4. For all other routes, Caddy serves compiled React assets from `/srv`, falling back to `/index.html` for client-side routing.
+5. In production, `backend/src/config/env.ts` parses `JWT_SECRET`. If its length is < 32 characters, the process immediately halts with exit code 1.
+6. Nightly at 02:00 AM AST, cron runs `scripts/backup_daily.sh`. The script executes `pg_dump -Fc` inside the DB container, verifies file size > 100 bytes, uploads the archive to an S3 bucket via `rclone copyto`, and deletes local archives older than 14 days. If the S3 upload fails, it exits immediately with error code 20.
+7. On the first Monday of each month, the operations team executes `./scripts/restore.sh` following the checklist in `docs/DEPLOY.md` to verify data recovery.
+
+### Concepts used:
+- **Reverse Proxy Ingress**: Positioning an edge server to manage TLS termination, HTTP/3 transport, and traffic routing before requests reach application containers.
+- **Same-Origin Policy (SOP)**: A foundational web security model where scripts running on one origin cannot access data on another unless explicit CORS policies are granted. Same-origin deployment avoids CORS entirely.
+- **W3C Secure Context**: Security requirement mandating HTTPS for privileged browser APIs including `getUserMedia`, Service Workers, and Geolocation.
+- **Fail-Loud Architectural Pattern**: Engineering background maintenance jobs to fail aggressively with explicit exit codes when downstream dependencies are missing.
+- **Off-Site Air-Gapped / Secondary Storage**: Maintaining database backups in a geographically separate cloud provider from the primary compute host.
+
+### Risks and assumptions:
+- **DNS Record Propagation**: Caddy cannot obtain Let's Encrypt certificates until the domain's public DNS A/AAAA records point to the server's public IP address.
+- **S3 Bucket Credentials**: `rclone copyto` assumes valid S3 credentials configured in `rclone.conf`. If credentials expire or bucket permissions change, the script will exit with code 20 until updated.
+
+### 30-second explanation:
+> *"In Step 6c, we hardened the platform for live demonstration and production hosting. We added Caddy to Docker Compose, which automates HTTPS certificates and serves the frontend and backend under the exact same domain. This eliminates CORS problems and provides the Secure Context that mobile phone cameras strictly require for scanning QR codes in the yard. We also updated the daily backup script to replicate dumps off-site to an S3 bucket using rclone—failing loudly if the upload ever fails—and added a monthly restore drill checklist to DEPLOY.md."*
+
+### Likely questions:
+1. **"Why does Caddy serving both frontend and backend eliminate CORS problems?"**
+   *Answer*: CORS is a browser security mechanism that restricts a web page on one domain or port from making requests to a different domain or port. By using Caddy to serve the frontend static files at `/` and reverse-proxy the API at `/api`, both share the exact same protocol, hostname, and port. The browser considers them same-origin, eliminating preflight `OPTIONS` requests and cross-origin blocking entirely.
+2. **"Why is HTTPS strictly necessary for the yard QR scanner to work?"**
+   *Answer*: Mobile browsers treat camera access as a privileged API. Under the W3C Secure Context specification, `navigator.mediaDevices.getUserMedia` is disabled on non-localhost HTTP connections. Without HTTPS, mobile phones in the yard cannot access camera hardware to scan asset tags.
+3. **"Why does the backup script fail with exit code 10 and 20 instead of just logging a warning?"**
+   *Answer*: Silent backup failures are a major cause of catastrophic data loss. If an off-site S3 backup fails, logging a warning and returning 0 fools cron and monitoring systems into thinking the backup succeeded. Exiting with non-zero error codes guarantees that monitoring agents, cron logs, and ops alert channels fire immediately.
+
+### How to verify:
+1. Run backend tests to verify environment validation and deployment guards:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All test suites pass (**113 tests passed**, including all 14 tests in `deployment.test.ts`).
+2. Run TypeScript linting:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: Exits with code 0.
+3. Verify production secret validation:
+   ```bash
+   npm --workspace=backend run test -- src/__tests__/deployment.test.ts
+   ```
+   *Expected Result*: All 14 tests pass, including rejection of `JWT_SECRET < 32` characters in production.
