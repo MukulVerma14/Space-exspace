@@ -175,7 +175,7 @@ function NavItem({ to, label }: { to: string; label: string }) {
       style={({ isActive }) => ({
         fontSize: 'var(--text-sm)',
         fontWeight: 500,
-        color: isActive ? 'var(--color-primary)' : 'var(--color-text-muted)',
+        color: isActive ? '#C8A96F' : '#FFFFF0',
         padding: 'var(--space-2) var(--space-3)',
         borderRadius: 'var(--radius-sm)',
         background: isActive ? 'var(--color-primary-glow)' : 'transparent',
