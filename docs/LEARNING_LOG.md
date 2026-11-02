@@ -1438,3 +1438,102 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    npm run test:backend
    ```
    *Expected Result*: All 9 test files pass (**121 tests passed**).
+
+
+---
+
+## Step 7: Store-Only Issued Customer Invoices, Math Reconciliation Invariants, and Universal Payment Auditing
+
+### What we built:
+1. **Issued Customer Invoices Endpoint (`POST /api/invoices/customer`)**:
+   - Implemented an admin-only endpoint to store customer invoices for rental agreements and material services in an atomic transaction (`BEGIN ... COMMIT`).
+   - Inserts header into `invoices` with `direction = 'issued'` and default `status = 'unpaid'`.
+   - Inserts itemized lines into `invoice_lines` with description, optional `item_id`, `quantity`, `unit_id`, and `unit_price`.
+   - Strictly enforces that customer invoices do **not** create stock movements, preserving physical warehouse inventory integrity.
+2. **Server-Side Mathematical Reconciliation Invariants (2 Decimals)**:
+   - Server computes subtotal directly from line items: $\sum \text{quantity} \times \text{unit\_price}$ rounded to 2 decimals.
+   - Strictly rejects client request with `400 Bad Request` ("Totals mismatch") if:
+     - Client `subtotal` differs from the sum of line items ($|\text{subtotal} - \text{computedSubtotal}| > 0.009$).
+     - Client `total` differs from $\text{subtotal} + \text{vat\_amount}$ ($|\text{total} - (\text{subtotal} + \text{vat\_amount})| > 0.009$).
+     - Any monetary field (`subtotal`, `vat_amount`, `total`, or line `unit_price`) exceeds 2 decimal places.
+3. **Relational Customer & Foreign Rental Ownership Guards**:
+   - `party_id` must reference an existing party with `is_customer = true`.
+   - If `rental_id` is supplied, the server validates that the rental exists and strictly belongs to that customer party (`rental.customer_id === party_id`); foreign rentals are rejected with `400 Bad Request`.
+   - Enforces natural key uniqueness on `(direction, party_id, invoice_no)`, returning `409 Conflict` on duplicates.
+4. **Universal Payment Settlement & Auditing (`PATCH /api/invoices/:id/payment`)**:
+   - Added migration `1730000000004_invoice_payment_audit.sql` adding `paid_by INTEGER REFERENCES users(id)` and expanding check constraint to include `void` status.
+   - Marks invoice `status = 'paid'`, records settlement date `paid_on` (defaulting to today), and records authorizing admin user ID in `paid_by`.
+   - Works symmetrically for both `issued` customer invoices and `received` supplier invoices.
+   - Rejects future payment dates (`paid_on > today`), already paid invoices, and void invoices with `400 Bad Request`.
+5. **Plain File Reference String Support**:
+   - Added `file_url` optional field to both customer (`POST /api/invoices/customer`) and supplier (`POST /api/invoices/supplier`) invoices.
+   - Enforces max 500 characters and strictly rejects executable URL schemes (`javascript:`, `data:`, `vbscript:`) to prevent stored XSS attacks.
+6. **Comprehensive Automated Test Suite (`backend/src/__tests__/invoices.test.ts`)**:
+   - Implemented 19 automated tests covering staff 403 authorization, subtotal/total mismatch 400, duplicate 409, foreign rental 400, zero stock movements on issued invoices, payment state transitions (default today, future date rejection, double payment rejection, void rejection, both directions), and supplier invoice receipt regressions.
+   - Full backend test suite now passes with **140 / 140 tests across 10 test suites**.
+
+### Why it exists:
+- **Commercial Billing Accuracy**: Equipment rentals and site consumables must be billed to corporate customers. Storing structured lines provides the accounting record required by operations.
+- **Protection Against Financial Drift**: Relying on client-calculated totals without server validation allows rounding errors, manual accounting slip-ups, or malicious client manipulation to corrupt corporate receivables ledgers.
+- **Zero Inventory Ledger Corruption**: In Step 5, supplier invoices generated stock movement receipts because suppliers deliver physical materials to the yard. Customer invoices bill for rental time; generating stock receipts on customer invoices would falsely inflate inventory counts.
+- **Audit Compliance on Debt Settlement**: Settling invoices without logging the authorizing administrator and payment date creates an audit black hole. The system must know which accountant or manager marked an invoice paid.
+
+### Why this way:
+- **Server Math Reconciliation over Client Blind Trust**:
+  - *Alternative 1 Rejected (Accepting Client Subtotal / Total Blindly)*: If client applications or frontend forms calculate VAT or line sums, rounding differences (e.g. half-up vs floor) lead to 1-cent discrepancies across thousands of invoices. Computing line totals on the server and asserting exact mathematical tie-out prevents ledger drift.
+- **Store-Only Pipeline over Full PDF / ZATCA Phase 2 Invoicing**:
+  - *Alternative 2 Rejected (Generating PDF Graphics and ZATCA Cryptographic XML)*: Implementing complete ZATCA Phase 2 e-invoicing (UBL 2.1 XML, ECDSA cryptographic signatures, QR TLV hashes, clearance APIs) is a massive tax-compliance undertaking out of scope for an operational equipment tracker prototype (confirmed in Open Questions #4). Storing clean relational lines allows future export to external ERP or e-invoicing pipelines.
+- **Relational Ownership Checks over Open Foreign Keys**:
+  - *Alternative 3 Rejected (Allowing any `rental_id` without verifying `customer_id`)*: If user enters rental #12 belonging to Aramco on an invoice for SABIC, confidential project equipment data leaks across commercial accounts. Enforcing `rental.customer_id === party_id` maintains strict multi-tenant boundary integrity.
+
+### How it works:
+1. Admin client sends `POST /api/invoices/customer` with `party_id`, `invoice_no`, optional `rental_id`, `invoice_date`, `due_date`, `subtotal`, `vat_amount`, `total`, optional `file_url`, and `lines`.
+2. Zod validates formatting and limits.
+3. Server loops through line items, computes line totals with 2 decimal rounding, sums them to `computedSubtotal`, and verifies `|subtotal - computedSubtotal| <= 0.009` and `|total - (subtotal + vat_amount)| <= 0.009`.
+4. Inside a database transaction (`pool.connect()`, `BEGIN`):
+   - Verifies `parties.is_customer = true`.
+   - If `rental_id` given, verifies `rentals.customer_id === party_id`.
+   - Verifies duplicate natural key `(direction, party_id, invoice_no)` does not exist.
+   - Inserts into `invoices` with `direction = 'issued'`, `status = 'unpaid'`.
+   - Inserts lines into `invoice_lines`.
+   - Commits transaction (`COMMIT`).
+5. When customer payment arrives, Admin calls `PATCH /api/invoices/:id/payment` with optional `{ paid_on }`.
+6. Server verifies `paid_on <= today`, checks that current status is `unpaid` (not `paid` and not `void`), and updates `status = 'paid'`, `paid_on = targetPaidOn`, `paid_by = req.user.id`.
+
+### Concepts used:
+- **Mathematical Reconciliation**: Validating that independent summary fields mathematically tie out to itemized line sums before committing to persistent storage.
+- **Multi-Tenant Ownership Verification**: Guarding relational links (`rental_id`) to ensure they belong exclusively to the target party entity.
+- **State Machine Guard**: Protecting business entity state transitions (`unpaid -> paid`), prohibiting invalid terminal state re-entry or settling void documents.
+- **Audit Trail Attribution**: Capturing authenticated user IDs on financial status changes (`paid_by`).
+
+### Risks and assumptions:
+- **Assumption**: Rental agreements are invoiced in Saudi Riyals (SAR) using standard 15% VAT (or zero-rated if exempt). Invoices store explicit amounts rather than enforcing a hardcoded 15% calculation to allow for zero-rated or exempt contract lines.
+- **Risk**: External document storage (PDF files referenced by `file_url`) is managed outside the database (e.g. S3 bucket or local folder). The database stores the sanitized reference string, not the binary blob.
+
+### 30-second explanation:
+> *"We implemented the complete store-only issued customer invoices workflow (POST /api/invoices/customer) and universal payment settlement (PATCH /api/invoices/:id/payment). The server independently computes line subtotals and rejects any submission where subtotal, VAT, or total fail to reconcile mathematically within 2 decimal places. Foreign rentals are blocked from customer invoices, duplicate invoice numbers return 409 Conflict, and customer billing produces zero stock movement side-effects. Payment settlement verifies dates, prevents double-payment or paying void invoices, and logs the acting admin user. All 19 new tests pass, bringing our backend test suite to 140 / 140 passing tests."*
+
+### Likely questions:
+1. **"Why does `POST /api/invoices/customer` not create stock movements like `POST /api/invoices/supplier` does?"**
+   *Answer*: Supplier invoices represent incoming deliveries of consumable steel, oil, and parts from vendors, which increases physical stock in the warehouse. Customer invoices bill clients for equipment rental time (e.g. 1 month of crane hire); they do not alter warehouse inventory counts.
+2. **"Why does the server check reconciliation rather than just calculating total itself and ignoring what the client sent?"**
+   *Answer*: In commercial accounting, silent discrepancies between what the accountant thought they submitted and what the database stored cause massive audit reconciliation nightmares. Failing fast with `400 Bad Request` forces the submitting system or user to resolve math mismatches explicitly.
+3. **"Can an invoice be marked paid with a back-dated date?"**
+   *Answer*: Yes, back-dating (`paid_on < today`) is supported because bank transfers often take a few days to reconcile in accounting books. However, future dates (`paid_on > today`) are strictly rejected.
+
+### How to verify:
+1. Run backend automated test suite:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 10 test suites pass cleanly (**140 tests passed**, including all 19 tests in `invoices.test.ts`).
+2. Run backend typecheck:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: `tsc --noEmit` exits with 0 errors.
+3. Run frontend production build:
+   ```bash
+   npm run build:frontend
+   ```
+   *Expected Result*: Static bundle compiles with 0 errors.

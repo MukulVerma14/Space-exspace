@@ -47,9 +47,11 @@ This document provides a comprehensive specification of every REST API endpoint 
 | `GET` | [`/api/invoices`](#21-get-apiinvoices) | Admin Only (`role: 'admin'`) | List stored supplier and customer invoices |
 | `GET` | [`/api/invoices/:id`](#22-get-apiinvoicesid) | Admin Only (`role: 'admin'`) | Get invoice details with line items |
 | `POST` | [`/api/invoices/supplier`](#23-post-apiinvoicessupplier) | Admin Only (`role: 'admin'`) | Record received supplier invoice & auto-update material price history |
-| `GET` | [`/api/sync/snapshot`](#24-get-apisyncsnapshot) | Authenticated (`admin`, `staff`) | Fetch offline read snapshot (ETag conditional caching, role-filtered) |
-| `POST` | [`/api/sync`](#25-post-apisync) | Authenticated (`admin`, `staff`) | Replay offline event batches (idempotent UUIDs, row-locked trigger guards) |
-| `GET` | [`/api/labels/sheet`](#26-get-apilabelssheet) | Authenticated (`admin`, `staff`) | Printable A4 PDF/HTML grid of equipment QR labels (error correction H, plain asset code payload) |
+| `POST` | [`/api/invoices/customer`](#24-post-apiinvoicescustomer) | Admin Only (`role: 'admin'`) | Record issued customer invoice with lines (store-only commercial billing) |
+| `PATCH` | [`/api/invoices/:id/payment`](#25-patch-apiinvoicesidpayment) | Admin Only (`role: 'admin'`) | Mark invoice as paid with payment date auditing (issued & received) |
+| `GET` | [`/api/sync/snapshot`](#26-get-apisyncsnapshot) | Authenticated (`admin`, `staff`) | Fetch offline read snapshot (ETag conditional caching, role-filtered) |
+| `POST` | [`/api/sync`](#27-post-apisync) | Authenticated (`admin`, `staff`) | Replay offline event batches (idempotent UUIDs, row-locked trigger guards) |
+| `GET` | [`/api/labels/sheet`](#28-get-apilabelssheet) | Authenticated (`admin`, `staff`) | Printable A4 PDF/HTML grid of equipment QR labels (error correction H, plain asset code payload) |
 
 ---
 
@@ -776,6 +778,7 @@ Stores a received supplier invoice with item lines, updating material purchase p
   "vat_amount": 360.00,
   "total": 2760.00,
   "notes": "Emergency purchase of mild steel plates",
+  "file_url": "scan_reference_batch_123.pdf",
   "record_stock_receipt": true,
   "lines": [
     {
@@ -801,7 +804,106 @@ Stores a received supplier invoice with item lines, updating material purchase p
 
 ---
 
-### 24. `GET /api/sync/snapshot`
+### 24. `POST /api/invoices/customer`
+
+Stores an issued customer invoice for commercial equipment rental or material services with itemized lines in one atomic transaction. **Admin only.**
+
+- **Method**: `POST`
+- **Path**: `/api/invoices/customer`
+- **Auth Required**: `Bearer <token>` (`role: 'admin'`)
+- **Business Invariants**:
+  - `party_id` must reference a registered customer (`is_customer = true`).
+  - `rental_id` (if supplied) must exist and belong to the specified customer party.
+  - Server computes subtotal from lines ($\sum \text{quantity} \times \text{unit\_price}$) and rejects if client's `subtotal`, `vat_amount`, or `total` do not reconcile mathematically (numeric, 2 decimals max).
+  - Duplicate `(direction, party_id, invoice_no)` returns `409 Conflict`.
+  - **Zero stock movement**: Never writes to `stock_movements`.
+  - `file_url` is a plain reference string (max 500 chars, executable schemes like `javascript:` rejected).
+
+- **Request Body**:
+```json
+{
+  "party_id": 2,
+  "rental_id": 1,
+  "invoice_no": "INV-SE-2026-0099",
+  "invoice_date": "2026-11-01",
+  "due_date": "2026-11-30",
+  "subtotal": 15000.00,
+  "vat_amount": 2250.00,
+  "total": 17250.00,
+  "notes": "November 2026 crane service",
+  "file_url": "s3://space-exspace-docs/invoices/INV-SE-2026-0099.pdf",
+  "lines": [
+    {
+      "description": "50T Tadano Crane Monthly Rental",
+      "quantity": 1.000,
+      "unit_id": 1,
+      "unit_price": 12000.00
+    },
+    {
+      "description": "Rigging Mobilization Fee",
+      "quantity": 1.000,
+      "unit_id": 1,
+      "unit_price": 3000.00
+    }
+  ]
+}
+```
+
+#### Response (201 Created)
+```json
+{
+  "message": "Customer invoice recorded successfully",
+  "invoice_id": 5,
+  "invoice_no": "INV-SE-2026-0099",
+  "direction": "issued",
+  "lines_recorded": 2,
+  "subtotal": 15000.00,
+  "vat_amount": 2250.00,
+  "total": 17250.00
+}
+```
+
+---
+
+### 25. `PATCH /api/invoices/:id/payment`
+
+Marks an issued or received invoice as paid and records the settlement timestamp and authorizing administrator. **Admin only.**
+
+- **Method**: `PATCH`
+- **Path**: `/api/invoices/:id/payment`
+- **Auth Required**: `Bearer <token>` (`role: 'admin'`)
+- **Business Invariants**:
+  - `paid_on` defaults to today (`YYYY-MM-DD`) if omitted.
+  - Rejects if `paid_on` is in the future.
+  - Rejects if invoice is already `paid` or `void` (`400 Bad Request`).
+  - Records authenticated admin's ID in `paid_by`.
+  - Works universally for both `issued` and `received` invoices.
+
+- **Request Body**:
+```json
+{
+  "paid_on": "2026-11-02"
+}
+```
+
+#### Response (200 OK)
+```json
+{
+  "message": "Invoice marked as paid successfully",
+  "data": {
+    "id": 5,
+    "direction": "issued",
+    "invoice_no": "INV-SE-2026-0099",
+    "status": "paid",
+    "paid_on": "2026-11-02",
+    "paid_by": 1
+  }
+}
+```
+
+---
+
+### 26. `GET /api/sync/snapshot`
 
 Returns cacheable operational data according to the caller's role for offline client storage. Supports HTTP conditional caching via deterministic ETag and private caching headers.
 
@@ -902,7 +1004,7 @@ When creating offline events, clients must add $\Delta t$ to local time so `occu
 
 ---
 
-### 25. `POST /api/sync`
+### 27. `POST /api/sync`
 
 Batch replayer for offline field events. Accepts up to 50 events per batch.
 
@@ -1040,7 +1142,7 @@ When re-submitting an already processed `client_event_id`:
 
 ---
 
-### 26. `GET /api/labels/sheet`
+### 28. `GET /api/labels/sheet`
 
 Generates a printable A4 HTML sheet or JSON feed of equipment QR labels.
 

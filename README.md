@@ -214,6 +214,7 @@ npm run build:frontend
 - [ADR 004: Quotation Lifecycle, Cancellation Item Freeing, and Future Booking Overlap Scope](docs/decisions/004-quotation-lifecycle-and-booking-overlap-scope.md)
 - [ADR 014: Plain Text QR Code Payload vs URLs](docs/decisions/014-plain-text-qr-payload.md)
 - [ADR 015: Client-Side Encrypted Off-Site Backups and Lifecycle Retention](docs/decisions/015-client-side-encrypted-backups.md)
+- [ADR 016: Store-Only Issued Customer Invoices, Math Reconciliation Invariants, and Payment State Auditing](docs/decisions/016-store-only-issued-customer-invoices-and-reconciliation.md)
 
 ## Documentation & Architecture
 - [Frontend Guide](frontend/README.md)
