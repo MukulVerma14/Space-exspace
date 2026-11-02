@@ -1647,3 +1647,98 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    npm run build:frontend
    ```
    *Expected Result*: Frontend builds cleanly.
+
+---
+
+## Step: Stock Movements 'void_reversal' Type, Price History & Valuation Void Exclusion, and Consumed Material Administration
+
+### What we built:
+1. **Dedicated `void_reversal` Stock Movement Type (`1730000000006_stock_movements_void_reversal_type.sql`)**:
+   - Extended database constraint `stock_movements_type_check` to include `void_reversal`:
+     `CHECK (type IN ('receipt', 'issue', 'adjustment', 'return', 'void_reversal'))`.
+   - Clear semantic separation:
+     - `return`: Unused physical materials returned from job sites to warehouse inventory (signed positive `+qty`).
+     - `void_reversal`: System-generated compensating movement posted exclusively when voiding a received supplier invoice (signed negative `-qty`).
+2. **Exclusion of Voided Invoices from Price History and Inventory Valuation**:
+   - Updated `getMaterialPriceHistory` in `backend/src/controllers/materialsController.ts`:
+     - Price history line items query filtered with `inv.status != 'void'`: lines from voided invoices immediately disappear from historical pricing cards.
+     - Valuation summary query filtered with `LEFT JOIN invoices inv ON inv.id = sm.invoice_line_invoice_id WHERE ... AND (inv.id IS NULL OR inv.status != 'void')`: receipts belonging to voided invoices are completely excluded from `priced_receipts_count`, `priced_qty`, `total_valuation`, and `average_cost`.
+     - Physical inventory ledger (`stock_movements` and `GET /api/materials/:id/movements`) preserves both the original `receipt` and the compensating `void_reversal` movements for 100% auditability.
+3. **Comprehensive Administrator & Operations Guide (`docs/ADMIN_GUIDE.md`)**:
+   - Documented the exact error message administrators encounter when attempting to void an invoice whose goods have already been consumed:
+     ```json
+     {
+       "error": "Insufficient stock to void invoice",
+       "message": "Cannot void invoice: received items have already been consumed or issued, reducing remaining stock below the receipt quantity (Cannot issue 5.000 units of item 12: current stock is 2.000)"
+     }
+     ```
+   - Detailed the step-by-step resolution workflow (perform physical audit, post administrative stock adjustment `type = 'adjustment'` to satisfy deficit, execute void to trigger `void_reversal`, and record replacement supplier invoice or reconcile physical counts).
+   - Referenced from `docs/DEPLOY.md` and `README.md`.
+4. **Git Contributing Policy**:
+   - Updated `README.md` to explicitly mandate that all commits must be pushed **ONLY** to the active branch (`main`), never to `origin/Frontend`.
+5. **Architectural & API Updates**:
+   - Updated [ADR 017](decisions/017-decimal-money-math-4-decimal-unit-prices-and-compensating-void-reversals.md) and [`docs/API.md`](docs/API.md) reflecting `void_reversal`, positive `return`, and price history/valuation void filtering.
+6. **Automated Verification Suites**:
+   - Updated void reversal tests in `backend/src/__tests__/invoices.test.ts` to verify movement `type = 'void_reversal'`.
+   - Added new end-to-end integration test: creates supplier invoice, verifies price history and valuation, voids invoice, and proves that prices vanish from history and valuation excludes the receipt while both ledger rows remain intact.
+   - Suite total: **34 passing tests in invoices.test.ts; 155 / 155 passing tests across the entire backend**.
+
+### Why it exists:
+- **Operational Clarity in Warehouse Ledgers**: Reusing `return` with negative numbers creates reporting confusion: field supervisors think materials were returned from a site, when in fact an accounting document was cancelled. A distinct `void_reversal` type eliminates ambiguity.
+- **Accurate Financial & Cost Accounting**: When a supplier invoice is voided due to dispute, wrong pricing, or cancellation, continuing to count its purchase prices in historical weighted-average costs distorts material valuation and inventory asset reporting.
+- **Clear Administrative Guidance**: When the database trigger blocks a void because items were already consumed, administrators need an exact, documented operational procedure to resolve physical vs. commercial discrepancies safely without bypassing security constraints.
+
+### Why this way:
+- **Database CHECK Constraint Extension over Freeform Strings**:
+  - *Alternative 1 Rejected (Removing check constraint on `stock_movements.type`)*: Permitting arbitrary strings allows typos (`void-reversal`, `voided`, `reversal`) that break aggregation queries and ledger views. Extending the check constraint guarantees database-level validation.
+- **Relational Filter on Valuation over Mutating Stock Movement Records**:
+  - *Alternative 2 Rejected (Setting `unit_cost = NULL` on receipts when an invoice is voided)*: Mutating existing rows in an append-only ledger violates audit immutability. Filtering dynamically on `inv.status != 'void'` preserves historical data integrity while ensuring current financial reports are strictly accurate.
+- **Adjust-Then-Void Administrative Pattern over Overriding Triggers**:
+  - *Alternative 3 Rejected (Adding an `override_negative_stock=true` admin flag)*: Allowing an admin to force inventory negative breaks physical reality in the yard and invalidates concurrency locks. Requiring a deliberate stock adjustment forces the admin to account for physical items before cancelling the commercial document.
+
+### How it works:
+1. When voiding a supplier invoice (`PATCH /api/invoices/:id/void`):
+   - Controller locates positive receipts linked to the invoice.
+   - Inserts compensating entries into `stock_movements` with `type = 'void_reversal'`, `qty = -receipt.qty`, preserving `unit_cost` and attributing the acting admin.
+   - PostgreSQL trigger `check_stock_movement_non_negative()` confirms on-hand inventory is sufficient.
+   - Marks invoice status `status = 'void'`.
+2. When querying price history (`GET /api/materials/:id/price-history`):
+   - SQL query joins `invoices inv` and filters `WHERE inv.status != 'void'`. Lines from voided invoices are omitted.
+   - Valuation query calculates weighted average cost from `stock_movements` excluding rows linked to voided invoices.
+
+### Concepts used:
+- **Explicit Domain Event Types**: Using distinct, descriptive ledger movement types (`void_reversal` vs `return`) to avoid semantic overloading.
+- **Dynamic Ledger Projection**: Deriving commercial views (valuation, price history) from underlying event streams with conditional status filters.
+- **Compensating Administrative Workflows**: Resolving state machine interlocks through compensating transactions rather than administrative force flags.
+
+### Risks and assumptions:
+- **Assumption**: A supplier invoice can be voided at any time before payment; once paid, it must be refunded or settled through a credit note rather than voided.
+- **Audit Consistency**: All ledger movements (both original receipts and reversals) are retained permanently.
+
+### 30-second explanation:
+> *"We introduced a dedicated 'void_reversal' movement type in PostgreSQL for voided supplier invoices, preserving 'return' strictly for positive physical goods returned from job sites. When an invoice is voided, its prices immediately disappear from price history and its receipts are excluded from inventory valuation, while physical movements remain in the audit ledger. For cases where material was already consumed, we documented the exact error message and the 3-step 'adjust, then void' resolution procedure in docs/ADMIN_GUIDE.md. All 155 tests pass, and Git pushes are now configured to target only the active working branch."*
+
+### Likely questions:
+1. **"What is the difference between a 'return' and a 'void_reversal' in the stock movements ledger?"**
+   *Answer*: A 'return' represents physical goods that were checked out for a job and later returned unused to the yard (increasing stock, positive qty). A 'void_reversal' is a system-generated financial/inventory reversal posted when a supplier invoice is cancelled (decreasing stock, negative qty) to offset the original purchase receipt.
+2. **"Why do physical movements remain in the ledger if the invoice was voided?"**
+   *Answer*: The single-entry inventory ledger is immutable and append-only. If a truck delivered 10 pipes and they were unloaded into the yard, that physical event happened. When the invoice is voided, the system appends a 'void_reversal' for -10 pipes. The sum of the two movements is 0, but the history proves who received the goods and who voided them.
+3. **"What should an admin do if voiding fails with 'Insufficient stock to void invoice'?"**
+   *Answer*: This happens because items from the shipment were already consumed in maintenance or issued to rentals. As documented in docs/ADMIN_GUIDE.md, the admin must post a stock adjustment (type='adjustment') to balance the inventory, execute the void, and then record the replacement supplier invoice or adjust yard counts.
+
+### How to verify:
+1. Run backend automated tests:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 10 test suites pass cleanly (**155 tests passed**, including all 34 in `invoices.test.ts`).
+2. Run backend typecheck and lint:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: Exits with 0 errors.
+3. Run frontend production build:
+   ```bash
+   npm run build:frontend
+   ```
+   *Expected Result*: Static bundle compiles with 0 errors.

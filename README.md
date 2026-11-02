@@ -143,6 +143,13 @@ docker compose -f docker-compose.prod.yml up -d
 
 ---
 
+## Contributing & Git Workflow
+
+- **Branch Push Policy**: All development and automated agent commits must be pushed **ONLY** to the active working branch (`main`). Never push to `origin/Frontend` or other remote branches.
+- **Testing & Verification**: Always run the automated test suite (`npm run test:backend`), linter (`npm --workspace=backend run lint`), and build checks (`npm run build:frontend`) before pushing.
+
+---
+
 ## Troubleshooting Common Issues
 
 ### 1. `connect ECONNREFUSED 127.0.0.1:5432` (or `:5433`)
@@ -173,6 +180,7 @@ docker compose -f docker-compose.prod.yml up -d
 - [ADR 017: Arbitrary-Precision Decimal Money Math, 4-Decimal Unit Prices, Half-Up Rounding Rule, and Compensating Reversals for Voided Invoices](docs/decisions/017-decimal-money-math-4-decimal-unit-prices-and-compensating-void-reversals.md)
 
 ## Documentation & Architecture
+- [Administrator & Operations Guide](docs/ADMIN_GUIDE.md)
 - [Frontend Guide](frontend/README.md)
 - [Deployment & Operations Guide](docs/DEPLOY.md)
 - [System Architecture & Data Model](docs/ARCHITECTURE.md)

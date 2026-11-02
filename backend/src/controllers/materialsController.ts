@@ -5,7 +5,7 @@ import { sanitizeFinancials } from '../serializers/rateSerializer.js';
 
 const stockMovementSchema = z.object({
   item_id: z.number().int().positive('Item ID must be a positive integer'),
-  type: z.enum(['receipt', 'issue', 'adjustment', 'return']),
+  type: z.enum(['receipt', 'issue', 'adjustment', 'return', 'void_reversal']),
   qty: z.number().refine(val => val !== 0, 'Quantity cannot be zero'),
   unit_cost: z.number().nonnegative('Unit cost must be non-negative').nullable().optional(),
   maintenance_id: z.number().int().positive().optional(),
@@ -186,7 +186,7 @@ export async function recordStockMovement(req: Request, res: Response): Promise<
 
   // Calculate signed delta
   let signedQty: number;
-  if (type === 'issue') {
+  if (type === 'issue' || type === 'void_reversal') {
     signedQty = -Math.abs(qty);
   } else if (type === 'receipt' || type === 'return') {
     signedQty = Math.abs(qty);
@@ -263,19 +263,23 @@ export async function getMaterialPriceHistory(req: Request, res: Response): Prom
     JOIN invoices inv ON inv.id = il.invoice_id
     JOIN parties p ON p.id = inv.party_id
     JOIN units u ON u.id = il.unit_id
-    WHERE il.item_id = $1 AND inv.direction = 'received' AND il.unit_price IS NOT NULL
+    WHERE il.item_id = $1 AND inv.direction = 'received' AND il.unit_price IS NOT NULL AND inv.status != 'void'
     ORDER BY inv.invoice_date DESC, inv.id DESC, il.line_no ASC
   `;
 
-  // Valuation summary strictly excluding NULL unit_cost movements (e.g. offline receipts pending supplier invoices)
+  // Valuation summary strictly excluding NULL unit_cost movements and receipts belonging to voided invoices
   const valuationQuery = `
     SELECT
       COUNT(*)::int AS priced_receipts_count,
-      COALESCE(SUM(qty), 0)::numeric(12,3) AS priced_qty,
-      COALESCE(SUM(qty * unit_cost), 0)::numeric(12,2) AS total_valuation,
-      COALESCE(SUM(qty * unit_cost) / NULLIF(SUM(qty), 0), 0)::numeric(12,2) AS average_cost
-    FROM stock_movements
-    WHERE item_id = $1 AND unit_cost IS NOT NULL AND qty > 0
+      COALESCE(SUM(sm.qty), 0)::numeric(12,3) AS priced_qty,
+      COALESCE(SUM(sm.qty * sm.unit_cost), 0)::numeric(12,2) AS total_valuation,
+      COALESCE(SUM(sm.qty * sm.unit_cost) / NULLIF(SUM(sm.qty), 0), 0)::numeric(12,2) AS average_cost
+    FROM stock_movements sm
+    LEFT JOIN invoices inv ON inv.id = sm.invoice_line_invoice_id
+    WHERE sm.item_id = $1
+      AND sm.unit_cost IS NOT NULL
+      AND sm.qty > 0
+      AND (inv.id IS NULL OR inv.status != 'void')
   `;
 
   const [result, valuationRes] = await Promise.all([

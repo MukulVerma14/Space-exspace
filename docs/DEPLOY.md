@@ -373,3 +373,10 @@ When selecting production infrastructure for SPACE EXSPACE, we evaluate a **Smal
    - The included `backup_daily.sh` and `restore.sh` scripts provide verified disaster recovery with minimal operational burden.
 2. **Phase 2: High-Volume Operational Scale (Migration to Managed RDS)**:
    - When operations grow beyond 50 concurrent active yard terminals, detach PostgreSQL from Docker Compose to a managed PostgreSQL cluster (e.g. AWS RDS PostgreSQL or managed regional DB *(to verify before quoting)*) for automated point-in-time recovery and multi-AZ failover, while keeping the Node.js API container stateless.
+
+---
+
+## 7. Operational & Administrative Procedures
+
+For day-to-day administrative operations, invoice lifecycle management, and troubleshooting inventory interlocks (such as resolving `Insufficient stock to void invoice` when received goods were already consumed), refer to the:
+- **[Administrator & Operations Guide](ADMIN_GUIDE.md)**

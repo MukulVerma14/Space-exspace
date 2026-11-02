@@ -654,7 +654,7 @@ Returns chronological ledger entries from `stock_movements`.
 
 ### 19. `POST /api/materials/movements`
 
-Records an inventory movement in the append-only ledger (`receipt`, `issue`, `adjustment`, `return`). Protected by database trigger `trg_check_stock_movement_non_negative`.
+Records an inventory movement in the append-only ledger (`receipt`, `issue`, `adjustment`, `return`, `void_reversal`). Invariants: `receipt` and `return` are positive (`+qty`); `issue` and `void_reversal` are negative (`-qty`); `adjustment` retains signed value. Protected by database trigger `trg_check_stock_movement_non_negative`.
 
 - **Method**: `POST`
 - **Path**: `/api/materials/movements`
@@ -695,7 +695,7 @@ Records an inventory movement in the append-only ledger (`receipt`, `issue`, `ad
 Captures purchase price fluctuations over time directly from supplier invoice lines and computes inventory valuation. **Admin only.**
 
 > [!NOTE]
-> Offline goods receipts (which have `unit_cost IS NULL`) and unpriced movements are strictly excluded from price history and weighted average cost calculations, preserving financial valuation accuracy without dilution from unpriced quantities.
+> Offline goods receipts (which have `unit_cost IS NULL`), unpriced movements, and receipts belonging to voided supplier invoices (`inv.status = 'void'`) are strictly excluded from price history and weighted average cost calculations, preserving financial valuation accuracy without dilution from unpriced quantities or cancelled invoices.
 
 - **Method**: `GET`
 - **Path**: `/api/materials/:id/price-history`
@@ -923,7 +923,7 @@ Voids an unpaid, non-void invoice and permanently records audit attribution. For
   - Rejects if invoice is already `void` (`400 Bad Request`).
   - **Audit Immutability**: The invoice and line item records are **never deleted**. Status is set to `'void'`, recording `voided_by`, `voided_at`, and `void_reason`.
   - **Zero Stock Movement for Issued Invoices**: Voiding a customer invoice creates no stock movements.
-  - **Compensating Reversals for Received Invoices**: For supplier invoices that generated stock receipts (`type = 'receipt'`), appends compensating movements (`type = 'return'`, signed negative `qty = -receipt.qty`, preserving original `unit_cost`). Historical `receipt` movements are never deleted.
+  - **Compensating Reversals for Received Invoices**: For supplier invoices that generated stock receipts (`type = 'receipt'`), appends compensating movements (`type = 'void_reversal'`, signed negative `qty = -receipt.qty`, preserving original `unit_cost`). Historical `receipt` movements are never deleted.
   - **Non-Negative Stock Guard**: If received inventory was already consumed, dispatched, or issued, PostgreSQL trigger `check_stock_movement_non_negative()` blocks the reversal and rolls back the transaction with `400 Bad Request` ("Insufficient stock to void invoice").
 
 - **Request Body**:

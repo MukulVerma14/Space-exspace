@@ -861,11 +861,105 @@ describe('Invoices API Suite — Issued & Received Invoices (Store-Only Workflow
       expect(receiptMov.type).toBe('receipt');
       expect(Number(receiptMov.qty)).toBe(6);
 
-      expect(returnMov.type).toBe('return');
+      expect(returnMov.type).toBe('void_reversal');
       expect(Number(returnMov.qty)).toBe(-6);
       expect(Number(returnMov.unit_cost)).toBe(100.00);
       expect(returnMov.note).toContain('Void reversal');
       expect(returnMov.note).toContain(invoiceNo);
+    });
+
+    it('excludes receipts belonging to voided invoices from price history, average cost, and valuation while physical movements remain in the ledger', async () => {
+      // 1. Retrieve category ID
+      const catRes = await pool.query<{ id: string | number }>(`SELECT id FROM item_categories LIMIT 1`);
+      const categoryId = parseInt(catRes.rows[0].id as string, 10);
+
+      // 2. Create a dedicated test item
+      const itemRes = await pool.query<{ id: string | number }>(
+        `INSERT INTO items (sku, name, category_id, unit_id)
+         VALUES ('TEST-ITEM-VOID-PRICING', 'Pricing Void Test Item', $1, $2)
+         RETURNING id`,
+        [categoryId, unitId]
+      );
+      const testItemId = parseInt(itemRes.rows[0].id as string, 10);
+
+      // 3. Create supplier invoice with 10 units at 50.00
+      const invoiceNo = 'INV-TEST-VOID-PRICE-001';
+      const createRes = await request(app)
+        .post('/api/invoices/supplier')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          party_id: supplierPartyId,
+          invoice_no: invoiceNo,
+          invoice_date: '2026-11-01',
+          due_date: '2026-11-30',
+          subtotal: 500.00,
+          vat_amount: 75.00,
+          total: 575.00,
+          record_stock_receipt: true,
+          lines: [
+            { item_id: testItemId, description: 'Pricing Test Line', quantity: 10, unit_id: unitId, unit_price: 50.00 }
+          ]
+        });
+
+      expect(createRes.status).toBe(201);
+      const invoiceId = createRes.body.invoice_id;
+
+      // 4. Verify initial price history and valuation
+      const preHistoryRes = await request(app)
+        .get(`/api/materials/${testItemId}/price-history`)
+        .set('Authorization', `Bearer ${adminToken}`);
+
+      expect(preHistoryRes.status).toBe(200);
+      expect(preHistoryRes.body.price_history.length).toBe(1);
+      expect(preHistoryRes.body.price_history[0].invoice_no).toBe(invoiceNo);
+      expect(Number(preHistoryRes.body.price_history[0].unit_price)).toBe(50.00);
+      expect(preHistoryRes.body.valuation.priced_receipts_count).toBe(1);
+      expect(preHistoryRes.body.valuation.priced_qty).toBe(10);
+      expect(preHistoryRes.body.valuation.total_valuation).toBe(500.00);
+      expect(preHistoryRes.body.valuation.average_cost).toBe(50.00);
+
+      // 5. Void the supplier invoice
+      const voidRes = await request(app)
+        .patch(`/api/invoices/${invoiceId}/void`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ reason: 'Disputed supplier pricing and cancelled delivery' });
+
+      expect(voidRes.status).toBe(200);
+      expect(voidRes.body.data.status).toBe('void');
+      expect(voidRes.body.data.reversal_movements_created).toBe(1);
+
+      // 6. Verify prices disappear from history and valuation excludes the voided receipt
+      const postHistoryRes = await request(app)
+        .get(`/api/materials/${testItemId}/price-history`)
+        .set('Authorization', `Bearer ${adminToken}`);
+
+      expect(postHistoryRes.status).toBe(200);
+      // Prices disappeared from history
+      expect(postHistoryRes.body.price_history.length).toBe(0);
+      // Valuation strictly excludes the voided receipt
+      expect(postHistoryRes.body.valuation.priced_receipts_count).toBe(0);
+      expect(postHistoryRes.body.valuation.priced_qty).toBe(0);
+      expect(postHistoryRes.body.valuation.total_valuation).toBe(0);
+      expect(postHistoryRes.body.valuation.average_cost).toBe(0);
+
+      // 7. Verify physical stock movements remain intact in the ledger
+      const movementsRes = await request(app)
+        .get(`/api/materials/${testItemId}/movements`)
+        .set('Authorization', `Bearer ${adminToken}`);
+
+      expect(movementsRes.status).toBe(200);
+      // Both the initial receipt and the void_reversal are preserved in the ledger
+      expect(movementsRes.body.data.length).toBe(2);
+      const types = movementsRes.body.data.map((m: { type: string }) => m.type);
+      expect(types).toContain('receipt');
+      expect(types).toContain('void_reversal');
+
+      // Stock on hand reflects net 0
+      const stockRes = await pool.query<{ stock: string }>(
+        `SELECT COALESCE(SUM(qty), 0) AS stock FROM stock_movements WHERE item_id = $1`,
+        [testItemId]
+      );
+      expect(Number(stockRes.rows[0].stock)).toBe(0);
     });
 
     it('rejects void with 400 if current stock is insufficient to reverse the received quantity', async () => {

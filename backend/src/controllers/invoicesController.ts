@@ -698,7 +698,7 @@ export async function markInvoicePayment(req: Request, res: Response): Promise<v
  * 3. Never deletes the invoice: sets status = 'void', records voided_by, voided_at, void_reason.
  * 4. For supplier invoices with stock receipts:
  *    - Does NOT silently delete receipts.
- *    - Inserts compensating reversing stock movements (type='return', signed negative qty)
+ *    - Inserts compensating reversing stock movements (type='void_reversal', signed negative qty)
  *      to restore accurate stock ledger without breaking append-only history.
  *    - Reversal movements are guarded by check_stock_movement_non_negative() trigger:
  *      if items have already been consumed and current stock is insufficient, voiding aborts.
@@ -784,7 +784,7 @@ export async function voidInvoice(req: Request, res: Response): Promise<void> {
           `INSERT INTO stock_movements (
             item_id, qty, type, invoice_line_invoice_id, invoice_line_no,
             unit_cost, moved_by, note, moved_at
-           ) VALUES ($1, $2, 'return', $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)`,
+           ) VALUES ($1, $2, 'void_reversal', $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)`,
           [
             receipt.item_id,
             reversingQty,

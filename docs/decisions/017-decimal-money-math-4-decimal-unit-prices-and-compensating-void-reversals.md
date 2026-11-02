@@ -19,7 +19,7 @@ Following the implementation of store-only issued customer invoices (ADR 016), c
    Real-world commercial billing occasionally necessitates voiding invoices due to billing disputes, data entry errors, or cancelled contracts:
    - Invoices must **never** be hard-deleted (`DELETE FROM invoices`), as this destroys audit trails, creates illegal gaps in sequential numbering, and violates statutory bookkeeping standards.
    - For supplier invoices that generated warehouse stock receipts (`type = 'receipt'`), simply deleting stock movement records violates the append-only ledger invariant and erases warehouse custody history.
-   - Conversely, leaving the stock intact without a supplier invoice results in unbacked "ghost inventory".
+   - Reversing these receipts using `type = 'return'` creates semantic confusion because in warehouse operations, `return` specifically denotes physical goods returned to stock from a job site (positive quantity).
    - If received stock has already been consumed, dispatched, or issued to a job site, voiding the invoice without checking on-hand inventory would drive warehouse stock negative, violating physical reality.
 
 ---
@@ -45,7 +45,7 @@ To guarantee deterministic mathematical reconciliation across frontend clients a
    $$\text{line\_total}_i = \text{round\_half\_up}(\text{quantity}_i \times \text{unit\_price}_i, 2)$$
    Ties (half-cents) are rounded away from zero (half-up), conforming to standard commercial invoicing practice.
 2. **Subtotal Calculation**:
-   $$\text{subtotal} = \sum_{i=1}^{N} \text{line\_total}_i$$
+   $$\text{subtotal} = \sum_{i=1}^{N} \text{line\_totals}_i$$
 3. **Grand Total Calculation**:
    $$\text{total} = \text{subtotal} + \text{vat\_amount}$$
 4. **Tolerance Validation**: Client-submitted totals must match server-computed totals within a $0.009$ delta (less than one cent) to account for harmless string-formatting differences while rejecting any actual penny discrepancies.
@@ -61,11 +61,14 @@ We introduce a voiding endpoint restricted to the `admin` role (`staff` receive 
   - Sets `status = 'void'`.
   - Records `voided_by = req.user.id`, `voided_at = CURRENT_TIMESTAMP`, and `void_reason = reason`.
 
-### 5. Compensating Reversing Stock Movements for Supplier Invoices
+### 5. Compensating Reversals via Dedicated `void_reversal` Movement Type
 When a received supplier invoice is voided:
-- **No Physical Row Deletion**: Historical `receipt` movements are **never** deleted. The append-only invariant of `stock_movements` remains strictly intact.
-- **Compensating Reversal Movement**: For every positive receipt linked to the invoice (`invoice_line_invoice_id = id AND type = 'receipt' AND qty > 0`), the server appends a compensating movement:
-  - `type = 'return'`
+- **Dedicated Movement Type**: Migration `1730000000006_stock_movements_void_reversal_type.sql` extends `stock_movements_type_check` to include `void_reversal`.
+- **Semantic Separation**:
+  - `return`: Reserved strictly for physical unused materials returned to the yard from a job site (signed positive quantity `+qty`).
+  - `void_reversal`: System-generated reversal posted exclusively when voiding a received supplier invoice (signed negative quantity `-qty`).
+- **Compensating Ledger Entry**: For every positive receipt linked to the invoice (`invoice_line_invoice_id = id AND type = 'receipt' AND qty > 0`), the server appends a compensating movement:
+  - `type = 'void_reversal'`
   - `qty = -receipt.qty` (signed negative)
   - `unit_cost = receipt.unit_cost` (preserves historical purchase cost)
   - `moved_by = req.user.id`
@@ -78,6 +81,11 @@ When a received supplier invoice is voided:
     `Cannot issue X units of item Y: current stock is Z`.
   - The controller catches this exception, rolls back the entire transaction, and returns `400 Bad Request` ("Insufficient stock to void invoice: received items have already been consumed or issued").
 
+### 6. Exclusion of Voided Receipts from Price History & Valuation
+- Historical material price queries (`GET /api/materials/:id/price-history`) explicitly filter out voided invoice lines (`inv.status != 'void'`).
+- Inventory valuation calculations strictly exclude receipts whose linked supplier invoice is voided (`(inv.id IS NULL OR inv.status != 'void')`), ensuring voided invoices do not corrupt average cost or total stock valuation.
+- Physical ledger entries remain permanently visible in `stock_movements` and `GET /api/materials/:id/movements` to maintain complete traceability.
+
 ---
 
 ## Alternatives Considered & Rejected
@@ -89,10 +97,13 @@ When a received supplier invoice is voided:
    Rejected. Hard-deleting destroys corporate audit history, creates unexplainable gaps in invoice numbering sequences, and violates statutory tax regulations.
 
 3. **Deleting Linked Stock Receipts on Supplier Invoice Void**:
-   Rejected. Deleting ledger entries breaks the fundamental invariant of an append-only single-entry inventory ledger (ADR 002). Reversing entries (`type = 'return'`) provide complete provenance and explain inventory deductions.
+   Rejected. Deleting ledger entries breaks the fundamental invariant of an append-only single-entry inventory ledger (ADR 002). Reversing entries (`type = 'void_reversal'`) provide complete provenance and explain inventory deductions.
 
-4. **Allowing Stock to Go Negative on Void**:
-   Rejected. Allowing negative inventory breaks physical reality in the warehouse and circumvents the concurrency-locked non-negative trigger established in ADR 002 & ADR 007. If stock was consumed, the operational team must reconcile the inventory discrepancy or issue a credit note before the invoice can be cancelled.
+4. **Reusing `type = 'return'` for Void Reversals**:
+   Rejected. In yard operations, `return` means field workers returned unused materials back to stock (increasing inventory). Using a negative `return` to reverse a voided supplier invoice causes reporting confusion and audit errors. A dedicated `void_reversal` type makes the operational intent unambiguous.
+
+5. **Allowing Stock to Go Negative on Void**:
+   Rejected. Allowing negative inventory breaks physical reality in the warehouse and circumvents the concurrency-locked non-negative trigger established in ADR 002 & ADR 007. If stock was consumed, the operational team must reconcile the inventory discrepancy before the invoice can be cancelled (documented in `docs/ADMIN_GUIDE.md`).
 
 ---
 
@@ -101,8 +112,8 @@ When a received supplier invoice is voided:
 ### Positive
 - Total elimination of IEEE-754 float drift across invoice calculations and reconciliations.
 - Full support for precision 4-decimal unit pricing on bulk consumables and materials.
-- Complete, tamper-proof audit trail for invoice voiding with user attribution and rationale.
-- Inventory integrity maintained through single-entry compensating reversal entries and non-negative trigger guards.
+- Clean semantic separation between physical goods returns (`return`) and void reversals (`void_reversal`).
+- Price history and valuation strictly exclude voided supplier billing while preserving complete physical movement history in the audit ledger.
 
 ### Negative / Trade-offs
-- An invoice whose received materials have already been consumed cannot be voided directly via this endpoint until warehouse stock is reconciled. This is an intentional design safeguard to enforce physical inventory truth.
+- An invoice whose received materials have already been consumed cannot be voided directly via this endpoint until warehouse stock is reconciled. The admin procedure (adjust, then void) is documented in `docs/ADMIN_GUIDE.md`.
