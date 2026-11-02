@@ -49,9 +49,10 @@ This document provides a comprehensive specification of every REST API endpoint 
 | `POST` | [`/api/invoices/supplier`](#23-post-apiinvoicessupplier) | Admin Only (`role: 'admin'`) | Record received supplier invoice & auto-update material price history |
 | `POST` | [`/api/invoices/customer`](#24-post-apiinvoicescustomer) | Admin Only (`role: 'admin'`) | Record issued customer invoice with lines (store-only commercial billing) |
 | `PATCH` | [`/api/invoices/:id/payment`](#25-patch-apiinvoicesidpayment) | Admin Only (`role: 'admin'`) | Mark invoice as paid with payment date auditing (issued & received) |
-| `GET` | [`/api/sync/snapshot`](#26-get-apisyncsnapshot) | Authenticated (`admin`, `staff`) | Fetch offline read snapshot (ETag conditional caching, role-filtered) |
-| `POST` | [`/api/sync`](#27-post-apisync) | Authenticated (`admin`, `staff`) | Replay offline event batches (idempotent UUIDs, row-locked trigger guards) |
-| `GET` | [`/api/labels/sheet`](#28-get-apilabelssheet) | Authenticated (`admin`, `staff`) | Printable A4 PDF/HTML grid of equipment QR labels (error correction H, plain asset code payload) |
+| `PATCH` | [`/api/invoices/:id/void`](#26-patch-apiinvoicesidvoid) | Admin Only (`role: 'admin'`) | Void unpaid invoice with audit reason & compensating stock reversals |
+| `GET` | [`/api/sync/snapshot`](#27-get-apisyncsnapshot) | Authenticated (`admin`, `staff`) | Fetch offline read snapshot (ETag conditional caching, role-filtered) |
+| `POST` | [`/api/sync`](#28-post-apisync) | Authenticated (`admin`, `staff`) | Replay offline event batches (idempotent UUIDs, row-locked trigger guards) |
+| `GET` | [`/api/labels/sheet`](#29-get-apilabelssheet) | Authenticated (`admin`, `staff`) | Printable A4 PDF/HTML grid of equipment QR labels (error correction H, plain asset code payload) |
 
 ---
 
@@ -767,6 +768,10 @@ Stores a received supplier invoice with item lines, updating material purchase p
 - **Method**: `POST`
 - **Path**: `/api/invoices/supplier`
 - **Auth Required**: `Bearer <token>` (`role: 'admin'`)
+- **Business Invariants**:
+  - Exact decimal arithmetic (`decimal.js`, `precision: 28, ROUND_HALF_UP`).
+  - `unit_price` supports up to 4 decimal places (`numeric(14,4)`) for fractional material unit pricing.
+  - Header amounts (`subtotal`, `vat_amount`, `total`) must have at most 2 decimal places.
 - **Request Body**:
 ```json
 {
@@ -814,7 +819,9 @@ Stores an issued customer invoice for commercial equipment rental or material se
 - **Business Invariants**:
   - `party_id` must reference a registered customer (`is_customer = true`).
   - `rental_id` (if supplied) must exist and belong to the specified customer party.
-  - Server computes subtotal from lines ($\sum \text{quantity} \times \text{unit\_price}$) and rejects if client's `subtotal`, `vat_amount`, or `total` do not reconcile mathematically (numeric, 2 decimals max).
+  - **Exact Decimal Arithmetic**: Computations run in `decimal.js` (`precision: 28, ROUND_HALF_UP`), completely eliminating IEEE-754 binary floating-point drift.
+  - **Commercial Rounding Rule**: Each line total is $\text{round\_half\_up}(\text{quantity} \times \text{unit\_price}, 2)$, $\text{subtotal} = \sum \text{line\_totals}$, and $\text{total} = \text{subtotal} + \text{vat\_amount}$. Mismatches $> 0.009$ return `400 Bad Request`.
+  - **Precision**: Line `unit_price` allows up to 4 decimal places (`numeric(14,4)`); header `subtotal`, `vat_amount`, and `total` allow at most 2 decimal places.
   - Duplicate `(direction, party_id, invoice_no)` returns `409 Conflict`.
   - **Zero stock movement**: Never writes to `stock_movements`.
   - `file_url` is a plain reference string (max 500 chars, executable schemes like `javascript:` rejected).
@@ -903,7 +910,49 @@ Marks an issued or received invoice as paid and records the settlement timestamp
 
 ---
 
-### 26. `GET /api/sync/snapshot`
+### 26. `PATCH /api/invoices/:id/void`
+
+Voids an unpaid, non-void invoice and permanently records audit attribution. For received supplier invoices, creates compensating reversing stock movements without deleting historical receipts. **Admin only.**
+
+- **Method**: `PATCH`
+- **Path**: `/api/invoices/:id/void`
+- **Auth Required**: `Bearer <token>` (`role: 'admin'`)
+- **Business Invariants**:
+  - Requires a non-empty `reason` string in the request body.
+  - Rejects if invoice is already `paid` (`400 Bad Request`).
+  - Rejects if invoice is already `void` (`400 Bad Request`).
+  - **Audit Immutability**: The invoice and line item records are **never deleted**. Status is set to `'void'`, recording `voided_by`, `voided_at`, and `void_reason`.
+  - **Zero Stock Movement for Issued Invoices**: Voiding a customer invoice creates no stock movements.
+  - **Compensating Reversals for Received Invoices**: For supplier invoices that generated stock receipts (`type = 'receipt'`), appends compensating movements (`type = 'return'`, signed negative `qty = -receipt.qty`, preserving original `unit_cost`). Historical `receipt` movements are never deleted.
+  - **Non-Negative Stock Guard**: If received inventory was already consumed, dispatched, or issued, PostgreSQL trigger `check_stock_movement_non_negative()` blocks the reversal and rolls back the transaction with `400 Bad Request` ("Insufficient stock to void invoice").
+
+- **Request Body**:
+```json
+{
+  "reason": "Returned defective steel tubes to supplier"
+}
+```
+
+#### Response (200 OK)
+```json
+{
+  "message": "Invoice voided successfully",
+  "data": {
+    "id": 5,
+    "direction": "received",
+    "invoice_no": "INV-SUP-2026-888",
+    "status": "void",
+    "voided_at": "2026-11-02T13:00:00Z",
+    "voided_by": 1,
+    "void_reason": "Returned defective steel tubes to supplier",
+    "reversal_movements_created": 1
+  }
+}
+```
+
+---
+
+### 27. `GET /api/sync/snapshot`
 
 Returns cacheable operational data according to the caller's role for offline client storage. Supports HTTP conditional caching via deterministic ETag and private caching headers.
 
@@ -1004,7 +1053,7 @@ When creating offline events, clients must add $\Delta t$ to local time so `occu
 
 ---
 
-### 27. `POST /api/sync`
+### 28. `POST /api/sync`
 
 Batch replayer for offline field events. Accepts up to 50 events per batch.
 
@@ -1142,7 +1191,7 @@ When re-submitting an already processed `client_event_id`:
 
 ---
 
-### 28. `GET /api/labels/sheet`
+### 29. `GET /api/labels/sheet`
 
 Generates a printable A4 HTML sheet or JSON feed of equipment QR labels.
 

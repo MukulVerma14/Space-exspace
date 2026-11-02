@@ -1,13 +1,22 @@
 import { Request, Response } from 'express';
 import { z } from 'zod';
+import { Decimal } from 'decimal.js';
 import { pool } from '../db/pool.js';
 
+// Configure Decimal for financial precision: 28 digits, standard commercial half-up rounding
+Decimal.set({ precision: 28, rounding: Decimal.ROUND_HALF_UP });
+
 /**
- * Validates that a numeric amount has at most 2 decimal places.
+ * Validates that a numeric or string amount has at most `max` decimal places without float drift.
  */
-const isTwoDecimals = (n: number): boolean => {
-  return Number.isFinite(n) && Number(n.toFixed(2)) === n;
-};
+function hasMaxDecimals(val: number | string, max: number): boolean {
+  try {
+    const d = new Decimal(val);
+    return d.isFinite() && d.decimalPlaces() <= max;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Plain reference string schema for file_url:
@@ -78,6 +87,10 @@ const markInvoicePaymentSchema = z.object({
   paid_on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'paid_on must be YYYY-MM-DD').optional()
 });
 
+const voidInvoiceSchema = z.object({
+  reason: z.string().trim().min(1, 'Void reason is required').max(500, 'Void reason cannot exceed 500 characters')
+});
+
 /**
  * List stored invoices with filters.
  * Admin only.
@@ -132,15 +145,20 @@ export async function listInvoices(req: Request, res: Response): Promise<void> {
       to_char(inv.paid_on, 'YYYY-MM-DD') AS paid_on,
       inv.paid_by,
       u_paid.name AS paid_by_name,
+      inv.voided_by,
+      u_void.name AS voided_by_name,
+      to_char(inv.voided_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS voided_at,
+      inv.void_reason,
       inv.file_url,
       inv.created_at,
       COUNT(il.line_no)::int AS line_count
     FROM invoices inv
     JOIN parties p ON p.id = inv.party_id
     LEFT JOIN users u_paid ON u_paid.id = inv.paid_by
+    LEFT JOIN users u_void ON u_void.id = inv.voided_by
     LEFT JOIN invoice_lines il ON il.invoice_id = inv.id
     ${whereSql}
-    GROUP BY inv.id, p.name, u_paid.name
+    GROUP BY inv.id, p.name, u_paid.name, u_void.name
     ORDER BY inv.invoice_date DESC, inv.id DESC
     LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}
   `;
@@ -188,12 +206,17 @@ export async function getInvoiceById(req: Request, res: Response): Promise<void>
       to_char(inv.paid_on, 'YYYY-MM-DD') AS paid_on,
       inv.paid_by,
       u_paid.name AS paid_by_name,
+      inv.voided_by,
+      u_void.name AS voided_by_name,
+      to_char(inv.voided_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS voided_at,
+      inv.void_reason,
       inv.file_url,
       inv.notes,
       inv.created_at
     FROM invoices inv
     JOIN parties p ON p.id = inv.party_id
     LEFT JOIN users u_paid ON u_paid.id = inv.paid_by
+    LEFT JOIN users u_void ON u_void.id = inv.voided_by
     WHERE inv.id = $1`,
     [invoiceId]
   );
@@ -256,6 +279,26 @@ export async function createSupplierInvoice(req: Request, res: Response): Promis
     record_stock_receipt,
     lines
   } = parsed.data;
+
+  // Validate decimal precision on header figures (max 2 decimals)
+  if (!hasMaxDecimals(subtotal, 2) || !hasMaxDecimals(vat_amount, 2) || !hasMaxDecimals(total, 2)) {
+    res.status(400).json({
+      error: 'Totals mismatch',
+      message: 'subtotal, vat_amount, and total must have at most 2 decimal places'
+    });
+    return;
+  }
+
+  // Validate line unit_prices (max 4 decimals)
+  for (const line of lines) {
+    if (!hasMaxDecimals(line.unit_price, 4)) {
+      res.status(400).json({
+        error: 'Totals mismatch',
+        message: `Line item '${line.description}' unit_price must have at most 4 decimal places`
+      });
+      return;
+    }
+  }
 
   const client = await pool.connect();
 
@@ -356,11 +399,15 @@ export async function createSupplierInvoice(req: Request, res: Response): Promis
  * Invariants:
  * 1. party must have is_customer = true.
  * 2. rental_id, if given, must belong to that party.
- * 3. Server computes subtotal from line items and rejects if subtotal, vat_amount, or total
- *    do not reconcile (numeric, 2 decimals).
- * 4. Duplicate (direction, party, invoice_no) returns 409.
- * 5. Must NOT create stock movements.
- * 6. file_url is a plain reference string (max length, no executable URL schemes).
+ * 3. Exact decimal arithmetic (Decimal.js, never JS floats):
+ *    - line_total = round_half_up(qty * unit_price, 2)
+ *    - subtotal = sum(line_totals)
+ *    - total = subtotal + vat_amount
+ * 4. unit_price allows up to 4 decimal places.
+ * 5. subtotal, vat_amount, and total allow up to 2 decimal places.
+ * 6. Duplicate (direction, party, invoice_no) returns 409.
+ * 7. Must NOT create stock movements.
+ * 8. file_url is a plain reference string (max length, no executable URL schemes).
  */
 export async function createCustomerInvoice(req: Request, res: Response): Promise<void> {
   const parsed = createCustomerInvoiceSchema.safeParse(req.body);
@@ -383,49 +430,55 @@ export async function createCustomerInvoice(req: Request, res: Response): Promis
     lines
   } = parsed.data;
 
-  // 1. Validate numeric 2-decimal precision on all amounts
-  if (!isTwoDecimals(subtotal)) {
+  // 1. Validate decimal precision on header amounts (max 2 decimals)
+  if (!hasMaxDecimals(subtotal, 2)) {
     res.status(400).json({ error: 'Totals mismatch', message: 'subtotal must have at most 2 decimal places' });
     return;
   }
-  if (!isTwoDecimals(vat_amount)) {
+  if (!hasMaxDecimals(vat_amount, 2)) {
     res.status(400).json({ error: 'Totals mismatch', message: 'vat_amount must have at most 2 decimal places' });
     return;
   }
-  if (!isTwoDecimals(total)) {
+  if (!hasMaxDecimals(total, 2)) {
     res.status(400).json({ error: 'Totals mismatch', message: 'total must have at most 2 decimal places' });
     return;
   }
 
-  // 2. Server computes subtotal from the line items (each line quantity * unit_price rounded to 2 decimals)
-  let computedSubtotal = 0;
+  // 2. Server computes subtotal from line items using Decimal arithmetic
+  // Each line total is rounded half-up to 2 decimal places (standard commercial rounding)
+  let computedSubtotal = new Decimal(0);
   for (const line of lines) {
-    if (!isTwoDecimals(line.unit_price)) {
+    if (!hasMaxDecimals(line.unit_price, 4)) {
       res.status(400).json({
         error: 'Totals mismatch',
-        message: `Line item '${line.description}' unit_price must have at most 2 decimal places`
+        message: `Line item '${line.description}' unit_price must have at most 4 decimal places`
       });
       return;
     }
-    const lineTotal = Math.round(line.quantity * line.unit_price * 100) / 100;
-    computedSubtotal = Math.round((computedSubtotal + lineTotal) * 100) / 100;
+    const lineQty = new Decimal(line.quantity);
+    const lineUnitPrice = new Decimal(line.unit_price);
+    const lineTotal = lineQty.times(lineUnitPrice).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+    computedSubtotal = computedSubtotal.plus(lineTotal);
   }
 
-  // 3. Reconcile client subtotal with line items sum
-  if (Math.abs(subtotal - computedSubtotal) > 0.009) {
+  // 3. Reconcile client subtotal with line items sum using exact Decimal equality
+  const clientSubtotal = new Decimal(subtotal);
+  if (!clientSubtotal.equals(computedSubtotal)) {
     res.status(400).json({
       error: 'Totals mismatch',
-      message: `Subtotal (${subtotal.toFixed(2)}) does not reconcile with sum of line items (${computedSubtotal.toFixed(2)})`
+      message: `Subtotal (${clientSubtotal.toFixed(2)}) does not reconcile with sum of line items (${computedSubtotal.toFixed(2)})`
     });
     return;
   }
 
-  // 4. Reconcile total with subtotal + vat_amount
-  const expectedTotal = Math.round((subtotal + vat_amount) * 100) / 100;
-  if (Math.abs(total - expectedTotal) > 0.009) {
+  // 4. Reconcile total with subtotal + vat_amount using exact Decimal equality
+  const clientVat = new Decimal(vat_amount);
+  const clientTotal = new Decimal(total);
+  const expectedTotal = computedSubtotal.plus(clientVat);
+  if (!clientTotal.equals(expectedTotal)) {
     res.status(400).json({
       error: 'Totals mismatch',
-      message: `Total (${total.toFixed(2)}) does not reconcile with subtotal (${subtotal.toFixed(2)}) + vat_amount (${vat_amount.toFixed(2)}) which equals ${expectedTotal.toFixed(2)}`
+      message: `Total (${clientTotal.toFixed(2)}) does not reconcile with subtotal (${clientSubtotal.toFixed(2)}) + vat_amount (${clientVat.toFixed(2)}) which equals ${expectedTotal.toFixed(2)}`
     });
     return;
   }
@@ -633,4 +686,154 @@ export async function markInvoicePayment(req: Request, res: Response): Promise<v
     message: 'Invoice marked as paid successfully',
     data: updateRes.rows[0]
   });
+}
+
+/**
+ * Void an invoice (works for both issued and received invoices).
+ * Admin only.
+ *
+ * Invariants:
+ * 1. Requires a non-empty void reason.
+ * 2. Rejects if invoice is already paid or void.
+ * 3. Never deletes the invoice: sets status = 'void', records voided_by, voided_at, void_reason.
+ * 4. For supplier invoices with stock receipts:
+ *    - Does NOT silently delete receipts.
+ *    - Inserts compensating reversing stock movements (type='return', signed negative qty)
+ *      to restore accurate stock ledger without breaking append-only history.
+ *    - Reversal movements are guarded by check_stock_movement_non_negative() trigger:
+ *      if items have already been consumed and current stock is insufficient, voiding aborts.
+ */
+export async function voidInvoice(req: Request, res: Response): Promise<void> {
+  const invoiceId = parseInt(req.params.id, 10);
+  if (isNaN(invoiceId)) {
+    res.status(400).json({ error: 'Invalid invoice ID' });
+    return;
+  }
+
+  const parsed = voidInvoiceSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Validation failed', details: parsed.error.format() });
+    return;
+  }
+
+  const { reason } = parsed.data;
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // 1. Fetch current invoice state
+    const existingRes = await client.query(
+      `SELECT id, direction, invoice_no, status, to_char(paid_on, 'YYYY-MM-DD') AS paid_on
+       FROM invoices WHERE id = $1`,
+      [invoiceId]
+    );
+
+    if (existingRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ error: 'Invoice not found' });
+      return;
+    }
+
+    const invoice = existingRes.rows[0];
+
+    // 2. Reject if already paid
+    if (invoice.status === 'paid') {
+      await client.query('ROLLBACK');
+      res.status(400).json({
+        error: 'Invoice already paid',
+        message: `Cannot void invoice '${invoice.invoice_no}' because it has already been paid on ${invoice.paid_on}`
+      });
+      return;
+    }
+
+    // 3. Reject if already void
+    if (invoice.status === 'void') {
+      await client.query('ROLLBACK');
+      res.status(400).json({
+        error: 'Invoice already void',
+        message: `Invoice '${invoice.invoice_no}' is already void`
+      });
+      return;
+    }
+
+    // 4. If supplier invoice, check for associated stock receipts and create compensating reversals
+    let reversalCount = 0;
+    if (invoice.direction === 'received') {
+      const receiptsRes = await client.query<{
+        id: string;
+        item_id: number;
+        qty: string;
+        unit_cost: string;
+        invoice_line_no: number;
+      }>(
+        `SELECT id, item_id, qty, unit_cost, invoice_line_no
+         FROM stock_movements
+         WHERE invoice_line_invoice_id = $1 AND type = 'receipt' AND qty > 0`,
+        [invoiceId]
+      );
+
+      for (const receipt of receiptsRes.rows) {
+        const positiveQty = Math.abs(parseFloat(receipt.qty));
+        const reversingQty = -positiveQty;
+
+        // Inserting negative movement will trigger check_stock_movement_non_negative()
+        // If current stock is lower than reversingQty, trigger raises exception and rolls back
+        await client.query(
+          `INSERT INTO stock_movements (
+            item_id, qty, type, invoice_line_invoice_id, invoice_line_no,
+            unit_cost, moved_by, note, moved_at
+           ) VALUES ($1, $2, 'return', $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)`,
+          [
+            receipt.item_id,
+            reversingQty,
+            invoiceId,
+            receipt.invoice_line_no,
+            receipt.unit_cost,
+            req.user!.id,
+            `Void reversal for supplier invoice #${invoice.invoice_no}: ${reason}`
+          ]
+        );
+        reversalCount++;
+      }
+    }
+
+    // 5. Update invoice status to 'void' with audit fields
+    const updateRes = await client.query(
+      `UPDATE invoices
+       SET status = 'void',
+           voided_by = $1,
+           voided_at = CURRENT_TIMESTAMP,
+           void_reason = $2
+       WHERE id = $3
+       RETURNING id, direction, invoice_no, status,
+                 to_char(voided_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS voided_at,
+                 voided_by, void_reason`,
+      [req.user!.id, reason, invoiceId]
+    );
+
+    await client.query('COMMIT');
+
+    res.status(200).json({
+      message: 'Invoice voided successfully',
+      data: {
+        ...updateRes.rows[0],
+        reversal_movements_created: reversalCount
+      }
+    });
+  } catch (err: unknown) {
+    await client.query('ROLLBACK');
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('Cannot issue') || msg.includes('current stock is')) {
+      res.status(400).json({
+        error: 'Insufficient stock to void invoice',
+        message: `Cannot void invoice: received items have already been consumed or issued, reducing remaining stock below the receipt quantity (${msg.replace(/.*error: /i, '').trim()})`
+      });
+      return;
+    }
+    res.status(500).json({ error: 'Failed to void invoice', details: msg });
+  } finally {
+    client.release();
+  }
 }

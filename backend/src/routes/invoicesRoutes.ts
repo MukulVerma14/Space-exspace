@@ -4,7 +4,8 @@ import {
   getInvoiceById,
   createSupplierInvoice,
   createCustomerInvoice,
-  markInvoicePayment
+  markInvoicePayment,
+  voidInvoice
 } from '../controllers/invoicesController.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 
@@ -27,5 +28,8 @@ router.post('/customer', createCustomerInvoice);
 
 // Mark invoice as paid (works for both issued and received invoices)
 router.patch('/:id/payment', markInvoicePayment);
+
+// Void an unpaid, non-void invoice (creates compensating stock movement for received invoices, never deletes)
+router.patch('/:id/void', voidInvoice);
 
 export default router;

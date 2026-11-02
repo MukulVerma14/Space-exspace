@@ -1537,3 +1537,113 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    npm run build:frontend
    ```
    *Expected Result*: Static bundle compiles with 0 errors.
+
+---
+
+## Step: Arbitrary-Precision Decimal Money Math, 4-Decimal Unit Prices, Half-Up Rounding Rule, and Compensating Invoice Void Reversals
+
+### What we built:
+1. **Arbitrary-Precision Decimal Arithmetic (`decimal.js`)**:
+   - Replaced all JavaScript native floating-point math across the invoice controller with `decimal.js` configured with 28 digits of precision and commercial half-up rounding (`Decimal.ROUND_HALF_UP`).
+   - Completely eliminated IEEE-754 binary floating-point drift (`0.1 + 0.2 === 0.30000000000000004`, `3 * 0.1 === 0.30000000000000004`, and cumulative summation drift across large line item counts).
+2. **Database Precision Migration (`1730000000005_invoice_void_and_unit_price_precision.sql`)**:
+   - `ALTER TABLE invoice_lines ALTER COLUMN unit_price TYPE NUMERIC(14,4)`: Supports fractional material and consumable unit prices down to fractions of a cent (e.g. $1.2345/kg).
+   - Added audit columns to `invoices`: `voided_by INTEGER REFERENCES users(id)`, `voided_at TIMESTAMPTZ`, and `void_reason TEXT`.
+3. **Documented Commercial Rounding Rule (ROUND_HALF_UP)**:
+   - Line items compute: $\text{line\_total}_i = \text{round\_half\_up}(\text{quantity}_i \times \text{unit\_price}_i, 2)$.
+   - Subtotal computes: $\text{subtotal} = \sum_{i=1}^N \text{line\_totals}_i$.
+   - Total computes: $\text{total} = \text{subtotal} + \text{vat\_amount}$.
+   - Validation accepts up to 4 decimal places on line `unit_price` and enforces at most 2 decimal places on header `subtotal`, `vat_amount`, and `total`.
+4. **Admin-Only Invoice Voiding (`PATCH /api/invoices/:id/void`)**:
+   - Requires mandatory non-empty audit `reason` string.
+   - Enforces terminal state guards: rejects already `paid` invoices and already `void` invoices with `400 Bad Request`.
+   - Never deletes records: updates `status = 'void'`, recording acting administrator `voided_by`, timestamp `voided_at`, and rationale `void_reason`.
+   - For customer invoices (`direction = 'issued'`): marks void without creating or altering stock movements.
+   - For supplier invoices (`direction = 'received'`): queries all positive receipts (`type = 'receipt' AND qty > 0`) and appends compensating movements (`type = 'return'`, signed negative `-qty`, original `unit_cost` preserved, audit note citing void reason).
+   - **PostgreSQL Non-Negative Stock Trigger Guard**: If received materials were already consumed or dispatched, the trigger raises an exception, the transaction rolls back, and the controller returns `400 Bad Request` ("Insufficient stock to void invoice").
+5. **Architectural Decision Record**:
+   - Published [ADR 017: Arbitrary-Precision Decimal Money Math, 4-Decimal Unit Prices, Half-Up Rounding Rule, and Compensating Reversals for Voided Invoices](decisions/017-decimal-money-math-4-decimal-unit-prices-and-compensating-void-reversals.md).
+6. **Automated Verification Suites**:
+   - Added 14 new automated tests in `backend/src/__tests__/invoices.test.ts` covering:
+     - 3 x 0.1 precision test.
+     - 0.1 + 0.2 multi-line precision test.
+     - 100 lines of 0.07 cumulative summation test.
+     - 4-decimal unit price acceptance with 2-decimal rounded line totals.
+     - Rejection of > 4 decimal places on unit_price (400).
+     - Rejection of > 2 decimal places on header amounts (400).
+     - RBAC staff 403 checks on void.
+     - Void missing reason rejection (400).
+     - Void already paid / already void rejections (400).
+     - Issued customer invoice voiding with zero stock movements.
+     - Supplier invoice voiding with compensating return movements.
+     - Concurrency trigger abort on void when remaining stock is insufficient.
+   - Full backend test suite now passes with **154 / 154 tests across all 10 test suites**.
+
+### Why it exists:
+- **Preventing Invoicing Drift**: In commercial construction and equipment leasing, subtotal rounding discrepancies of 1 cent between client forms and backend ledgers break reconciliation, trigger billing disputes, and delay payment processing.
+- **Support for Bulk Materials**: Raw metals, fuel, hydraulic lubricants, and bulk fasteners are purchased in fractional metric quantities with fractional cent unit prices. Forcing 2-decimal unit prices distorts real procurement costs.
+- **Audit Compliance on Invalidation**: Deleting invoices destroys audit trails and creates gaps in accounting sequences. Voiding must preserve immutable document history while explaining why the document was cancelled.
+- **Physical Inventory Reconciliation**: Supplier invoices create warehouse stock receipts. If an invoice is cancelled because the goods were rejected or returned, warehouse stock must be reduced accordingly without breaking the append-only ledger history.
+
+### Why this way:
+- **decimal.js Arbitrary Precision over Native JavaScript Floats**:
+  - *Alternative 1 Rejected (Native `Number` float arithmetic with `Math.round`)*: Native floats suffer from binary representation errors (e.g. `1.005 * 100 = 100.49999999999999`), causing false-negative rounding in commercial applications. `decimal.js` provides exact base-10 decimal calculations.
+- **Compensating Return Movements over Hard-Deleting Stock Receipts**:
+  - *Alternative 2 Rejected (Deleting rows from `stock_movements` on void)*: The inventory ledger is single-entry, signed, and append-only (ADR 002). Deleting historical rows violates the audit trail and hides who originally received the goods. Inserting a compensating `return` movement with negative quantity accurately reflects physical reality.
+- **Blocking Void when Stock is Insufficient over Driving Stock Negative**:
+  - *Alternative 3 Rejected (Allowing void to bypass trigger and drive inventory negative)*: If a shipment of 50 steel plates was received, and 45 were used in repairs leaving 5 in stock, attempting to void the 50-plate receipt would leave the yard at -45 plates. Physical inventory cannot be negative. Forcing the transaction to abort preserves physical truth and requires the team to resolve the physical inventory deficit before voiding the commercial document.
+
+### How it works:
+1. When creating an invoice (`POST /api/invoices/customer` or `POST /api/invoices/supplier`):
+   - Client sends header amounts and itemized lines.
+   - Server parses amounts with `Decimal(val)`.
+   - For each line: `lineTotal = Decimal(line.quantity).times(Decimal(line.unit_price)).toDecimalPlaces(2, Decimal.ROUND_HALF_UP)`.
+   - Computes `computedSubtotal = sum(lineTotals)`.
+   - Validates that client `subtotal` reconciles with `computedSubtotal` within 0.009 and `total` reconciles with `subtotal + vat_amount`.
+   - Stores `unit_price` in `NUMERIC(14,4)` column.
+2. When voiding an invoice (`PATCH /api/invoices/:id/void`):
+   - Authenticated admin provides `reason`.
+   - Controller checks that current status is neither `'paid'` nor `'void'`.
+   - If `direction === 'received'`, queries all positive receipts linked to the invoice in `stock_movements`.
+   - For each receipt, inserts a compensating row with `type = 'return'`, `qty = -receipt.qty`, `unit_cost = receipt.unit_cost`, and `moved_by = admin.id`.
+   - PostgreSQL trigger `check_stock_movement_non_negative()` verifies that on-hand stock covers the deduction. If not, the transaction aborts with 400.
+   - If valid, updates invoice `status = 'void'`, `voided_by = admin.id`, `voided_at = CURRENT_TIMESTAMP`, `void_reason = reason`.
+   - Commits atomic transaction.
+
+### Concepts used:
+- **Arbitrary-Precision Base-10 Arithmetic**: Doing calculations in decimal rather than binary floating-point to prevent decimal rounding artifacts.
+- **Commercial Rounding (Half-Up)**: Rounding half-cents away from zero to match standard commercial trade practice.
+- **Compensating Transaction Pattern**: Undoing side-effects in an append-only ledger by posting an inverse compensating record rather than mutating or deleting historical state.
+- **Row-Locked Trigger Invariant**: Executing `PERFORM id FROM items WHERE id = NEW.item_id FOR UPDATE` inside the database trigger to prevent concurrent race conditions from driving inventory negative.
+
+### Risks and assumptions:
+- **Assumption**: 4 decimal places on unit price is sufficient for all industrial materials and consumables handled by SPACE EXSPACE.
+- **Operational Reality**: If materials received on an invoice were already issued to field jobs, the invoice cannot be voided until the physical inventory is resolved (e.g. by logging an inventory adjustment or supplier return).
+
+### 30-second explanation:
+> *"We upgraded all invoice money calculations to arbitrary-precision decimal arithmetic (decimal.js) with standard commercial half-up rounding, eliminating IEEE-754 float drift completely (3 x 0.1, 0.1 + 0.2, and 100 lines of 0.07). Unit prices now support up to 4 decimal places in PostgreSQL, while invoice totals remain strictly 2 decimals. We also added admin-only invoice voiding (PATCH /api/invoices/:id/void): invoices are never deleted, and voiding a supplier invoice appends compensating return movements to the stock ledger rather than deleting receipts. If goods were already consumed and remaining stock is insufficient, the PostgreSQL trigger blocks the reversal. All 33 invoice tests and all 154 backend tests pass cleanly."*
+
+### Likely questions:
+1. **"Why does unit price allow 4 decimal places when line totals and invoice totals allow only 2?"**
+   *Answer*: Bulk commodities (fuels, lubricants, welding wire, fasteners) are often traded in large volumes at unit prices like 1.2345 SAR per unit. If restricted to 1.23, an order of 10,000 units incurs a 45 SAR discrepancy. Allowing 4 decimals on unit price preserves contract pricing while rounding each line item to 2 decimals for fiat currency settlement.
+2. **"Why can't I void a supplier invoice if the materials have already been used?"**
+   *Answer*: If a supplier delivered 10 motors and you installed all 10 into client cranes, you cannot legally or physically 'undo' the warehouse receipt because you have zero motors in the warehouse. Allowing the void would drive warehouse stock to -10, which violates physical reality. You must reconcile the physical discrepancy before voiding the receipt.
+3. **"Does voiding an invoice delete its lines from the database?"**
+   *Answer*: Never. The invoice header status changes to 'void', and the database records who voided it, when, and the mandatory reason. All line items and historical audit records remain intact for accounting compliance.
+
+### How to verify:
+1. Run backend automated tests:
+   ```bash
+   npm --workspace=backend run test
+   ```
+   *Expected Result*: All 10 test suites pass cleanly (**154 tests passed**, including all 33 in `invoices.test.ts`).
+2. Run backend typecheck and lint:
+   ```bash
+   npm --workspace=backend run lint
+   ```
+   *Expected Result*: Exits with 0 errors.
+3. Run frontend production build:
+   ```bash
+   npm run build:frontend
+   ```
+   *Expected Result*: Frontend builds cleanly.
