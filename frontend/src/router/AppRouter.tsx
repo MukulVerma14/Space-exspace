@@ -30,6 +30,7 @@ import StaffHomePage from '../pages/staff/StaffHomePage';
 import PlaceholderPage from '../pages/PlaceholderPage';
 import EquipmentListPage from '../pages/shared/EquipmentListPage';
 import MaterialsPage from '../pages/shared/MaterialsPage';
+import InvoicesPage from '../pages/admin/InvoicesPage';
 
 // ─── Root redirect ────────────────────────────────────────────────────────────
 
@@ -66,7 +67,7 @@ const router = createBrowserRouter([
           { path: '/admin/equipment',   element: <EquipmentListPage /> },
           { path: '/admin/rentals',     element: <PlaceholderPage title="Rentals" /> },
           { path: '/admin/materials',   element: <MaterialsPage /> },
-          { path: '/admin/invoices',    element: <PlaceholderPage title="Invoices" /> },
+          { path: '/admin/invoices',    element: <InvoicesPage /> },
         ],
       },
     ],

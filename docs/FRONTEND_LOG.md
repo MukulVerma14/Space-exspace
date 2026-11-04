@@ -612,3 +612,78 @@ npm run dev:frontend   # http://localhost:5173
 ### 30-Second Explanation
 
 > The Materials page gives yard operations a live view of consumable stock and reorder thresholds. Items running low automatically display an alert badge and can be isolated with a single click. For administrators, selecting an item opens full purchase price history and inventory valuation calculated from supplier invoices. For staff, commercial prices are completely locked down — staff see physical stock levels and ledger movements only, with no prices or money ever rendered on their screens.
+
+
+---
+
+## F-I2 — Invoices Page (Admin): Received/Issued Tabs, Detail Drawer & Status Badges
+
+**Date:** 2026-11-04  
+**Status:** ✅ Complete
+
+---
+
+### What Was Built
+
+| File | Purpose |
+|---|---|
+| `frontend/src/data/invoicesSource.ts` | Invoices data layer: `fetchInvoices` (paginated with direction and status filters) and `fetchInvoiceById` (full line items and audit metadata), with strict admin-only client guards. |
+| `frontend/src/pages/admin/InvoicesPage.tsx` | Admin invoice management screen: direction tabs (All, Received / Supplier, Issued / Customer), status filters (`unpaid`, `paid`, `void`), 300ms debounced search, plain text file references, and a slide-out line items drawer. |
+| `frontend/src/router/AppRouter.tsx` | Replaced placeholder route `/admin/invoices` with `<InvoicesPage />`. |
+| `frontend/src/__tests__/invoicesSource.test.ts` | 5 unit tests asserting admin fetching, query parameter serialization, and non-admin rejection without network requests. |
+
+---
+
+### Why — Key Design Decisions
+
+#### 1. Direction Tabs: Received (Supplier) vs. Issued (Customer)
+**Decision:** Top-level navigation tabs switch between **Received (Supplier)** and **Issued (Customer)** invoices, as well as an "All Invoices" overview.  
+**Why:** Supplier invoices represent stock replenishment receipts and material purchases, while customer invoices represent equipment rental and service billings. Segmenting them by tab prevents cognitive clutter while maintaining a unified accounting view.
+
+#### 2. Detail Drawer with Dynamic Line Items
+**Decision:** Clicking any invoice opens a slide-out drawer containing full party details, VAT registration number, related rental contract reference, file references, payment/void audit trails, and a complete line items table (`line_no`, `description`, `quantity`, `unit_price`, `line_total`).  
+**Why:** Quick inspection without full page reloads preserves filter and scroll positions on the main list.
+
+#### 3. Status Badges
+**Decision:** Distinct status badges for invoice lifecycle states:
+- `unpaid`: Amber warning badge (`--color-warning`)
+- `paid`: Emerald success badge (`--color-success`)
+- `void`: Neutral muted badge (`--color-text-muted`)  
+**Why:** Immediate visual clarity for accounting status across lists and drawers.
+
+#### 4. Plain Text File References & Strict Zero-Money-For-Staff Rule
+**Decision:** Attached file references (`file_url`) are rendered strictly as plain text (e.g. `<span>{file_url}</span>`) and never as executable or clickable `<a>` links. Furthermore, non-admin accounts cannot access the page (gated by `RequireAuth(role="admin")`) and `formatMoney` returns empty strings for non-admin callers.  
+**Why:** Eliminates client-side URL scheme execution vulnerabilities (XSS via `javascript:` / `data:`) and guarantees that staff members never see commercial figures.
+
+---
+
+### How to Test F-I2
+
+**1. Automated tests**
+```bash
+npm run test:frontend
+# 30/30 tests pass (including 5 in invoicesSource.test.ts)
+npm run build:frontend
+# tsc && vite build succeeds with exit code 0
+```
+
+**2. Manual testing checklist**
+```bash
+npm run dev:frontend   # http://localhost:5173
+```
+
+| Role | Test Step | Expected Result |
+|---|---|---|
+| Admin | Log in as admin (`admin@space-exs.com`) → Navigate to **Invoices** (`/admin/invoices`) | Invoices ledger loads with Summary Counters, Direction Tabs, and Table of Invoices. |
+| Admin | Click "Received (Supplier)" tab | Only supplier purchase invoices (`direction = 'received'`) are displayed. |
+| Admin | Click "Issued (Customer)" tab | Only customer billing invoices (`direction = 'issued'`) are displayed. |
+| Admin | Filter by Status: "Unpaid" | Only invoices with `status = 'unpaid'` are shown. |
+| Admin | Click "View Details" on an invoice | Side drawer slides open showing subtotal, 15% VAT, total in SAR, and the table of line items. |
+| Admin | Check file reference on an invoice with `file_url` | Rendered strictly as a plain text string; cannot be clicked as a hyperlink. |
+| Staff | Attempt to access `/admin/invoices` directly in browser | Automatically caught by `RequireAuth` and redirected to `/staff`. |
+
+---
+
+### 30-Second Explanation
+
+> The Invoices page provides administrators with a centralised commercial ledger for supplier purchases and customer rental billings. Direction tabs cleanly separate incoming vendor receipts from outgoing customer invoices. Selecting an invoice opens a detailed drawer with line-item breakdowns, tax calculations, and payment or void audit trails. Status badges highlight unpaid invoices, while file references are rendered safely as plain text strings.
