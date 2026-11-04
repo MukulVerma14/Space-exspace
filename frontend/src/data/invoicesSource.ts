@@ -100,11 +100,46 @@ export interface CreateSupplierInvoicePayload {
   lines: CreateSupplierInvoiceLinePayload[];
 }
 
+export interface CreateCustomerInvoiceLinePayload {
+  description: string;
+  item_id?: number | null;
+  quantity: number;
+  unit_id: number;
+  unit_price: number;
+}
+
+export interface CreateCustomerInvoicePayload {
+  party_id: number;
+  invoice_no: string;
+  rental_id?: number | null;
+  invoice_date: string;
+  due_date: string;
+  subtotal: number;
+  vat_amount: number;
+  total: number;
+  notes?: string | null;
+  file_url?: string | null;
+  lines: CreateCustomerInvoiceLinePayload[];
+}
+
 export interface CreateInvoiceResponse {
   message: string;
   invoice_id: number;
   invoice_no: string;
+  direction?: string;
   lines_recorded: number;
+  subtotal?: number;
+  vat_amount?: number;
+  total?: number;
+}
+
+export interface MarkInvoicePaymentResponse {
+  message: string;
+  invoice_id: number;
+  invoice_no: string;
+  status: 'paid';
+  paid_on: string;
+  paid_by: number;
 }
 
 /**
@@ -193,6 +228,39 @@ export async function createSupplierInvoice(
   }
 
   return api.post<CreateInvoiceResponse>('/api/invoices/supplier', payload);
+}
+
+/**
+ * Creates an issued customer invoice with line items (store-only workflow).
+ * Admin only.
+ */
+export async function createCustomerInvoice(
+  payload: CreateCustomerInvoicePayload,
+  userRole?: string
+): Promise<CreateInvoiceResponse> {
+  if (userRole && userRole !== 'admin') {
+    throw new Error('Unauthorized: Only administrators can record customer invoices.');
+  }
+
+  return api.post<CreateInvoiceResponse>('/api/invoices/customer', payload);
+}
+
+/**
+ * Marks an invoice as paid (works for both issued and received invoices).
+ * Admin only.
+ */
+export async function markInvoicePayment(
+  invoiceId: number,
+  paidOn?: string,
+  userRole?: string
+): Promise<MarkInvoicePaymentResponse> {
+  if (userRole && userRole !== 'admin') {
+    throw new Error('Unauthorized: Only administrators can record invoice payments.');
+  }
+
+  return api.patch<MarkInvoicePaymentResponse>(`/api/invoices/${invoiceId}/payment`, {
+    paid_on: paidOn,
+  });
 }
 
 export { formatMoney };

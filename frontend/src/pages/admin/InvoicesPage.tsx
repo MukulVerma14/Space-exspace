@@ -1,11 +1,13 @@
 /**
  * InvoicesPage — Admin invoice management view.
  *
- * Requirements (F-I2 & F-I3):
+ * Requirements (F-I2, F-I3, F-I4):
  * - Invoices page (admin): list with a received/issued tab.
  * - Detail drawer with lines.
  * - Status badges (unpaid, paid, void).
- * - "New supplier invoice" form modal with dynamic lines (item, quantity, unit, unit price).
+ * - "New supplier invoice" form modal with dynamic lines.
+ * - "New customer invoice" form modal with dynamic lines (F-I4).
+ * - "Mark paid" action with payment date verification (F-I4).
  * - Show computed totals with server as final authority.
  * - Show server errors clearly. Debounce item search; disable submit while in flight.
  * - Never render money for staff, and show file references as plain text.
@@ -21,9 +23,16 @@ import {
   InvoiceStatus,
   fetchInvoices,
   fetchInvoiceById,
+  markInvoicePayment,
   formatMoney,
 } from '../../data/invoicesSource';
 import NewSupplierInvoiceModal from '../../components/NewSupplierInvoiceModal';
+import NewCustomerInvoiceModal from '../../components/NewCustomerInvoiceModal';
+import { ApiRequestError } from '../../api/client';
+
+function getTodayString(): string {
+  return new Date().toISOString().split('T')[0];
+}
 
 export default function InvoicesPage() {
   const { user } = useAuth();
@@ -40,12 +49,21 @@ export default function InvoicesPage() {
   const [statusFilter, setStatusFilter] = useState<InvoiceStatus | 'all'>('all');
   const [search, setSearch] = useState('');
 
-  // Modals & Drawers state
+  // Modals state
   const [isSupplierModalOpen, setIsSupplierModalOpen] = useState(false);
+  const [isCustomerModalOpen, setIsCustomerModalOpen] = useState(false);
+
+  // Detail drawer state
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<number | null>(null);
   const [drawerDetail, setDrawerDetail] = useState<InvoiceDetail | null>(null);
   const [drawerLoading, setDrawerLoading] = useState(false);
   const [drawerError, setDrawerError] = useState<string | null>(null);
+
+  // Mark Paid Modal state
+  const [payingInvoice, setPayingInvoice] = useState<InvoiceListItem | InvoiceDetail | null>(null);
+  const [paidOnDate, setPaidOnDate] = useState(getTodayString());
+  const [paymentSubmitting, setPaymentSubmitting] = useState(false);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
 
   const debouncedSearch = useDebounce(search, 300);
 
@@ -108,6 +126,72 @@ export default function InvoicesPage() {
     handleOpenDetail(newId);
   }
 
+  // Handle customer invoice creation success
+  function handleCustomerInvoiceSuccess(newId: number, invNo: string) {
+    setIsCustomerModalOpen(false);
+    setSuccessNotice(`Customer invoice '${invNo}' recorded successfully.`);
+    loadInvoices();
+    handleOpenDetail(newId);
+  }
+
+  // Handle opening payment modal
+  function handleOpenPaymentModal(inv: InvoiceListItem | InvoiceDetail) {
+    setPayingInvoice(inv);
+    setPaidOnDate(getTodayString());
+    setPaymentError(null);
+    setPaymentSubmitting(false);
+  }
+
+  function handleClosePaymentModal() {
+    setPayingInvoice(null);
+    setPaymentError(null);
+    setPaymentSubmitting(false);
+  }
+
+  // Submit payment
+  async function handleConfirmPayment(e: React.FormEvent) {
+    e.preventDefault();
+    if (!payingInvoice) return;
+
+    setPaymentError(null);
+    const today = getTodayString();
+    if (paidOnDate > today) {
+      setPaymentError(`Payment date (${paidOnDate}) cannot be in the future (today is ${today}).`);
+      return;
+    }
+
+    setPaymentSubmitting(true);
+
+    try {
+      const res = await markInvoicePayment(payingInvoice.id, paidOnDate, user?.role);
+      setPaymentSubmitting(false);
+      setPayingInvoice(null);
+      setSuccessNotice(`Invoice '${res.invoice_no}' marked as paid on ${res.paid_on}.`);
+
+      // Refresh list
+      loadInvoices();
+
+      // If drawer is open with this invoice, update it
+      if (selectedInvoiceId === payingInvoice.id) {
+        handleOpenDetail(payingInvoice.id);
+      }
+    } catch (err: unknown) {
+      setPaymentSubmitting(false);
+      if (err instanceof ApiRequestError) {
+        const body = err.body as Record<string, unknown> | null;
+        if (body && typeof body === 'object' && body.message) {
+          setPaymentError(String(body.message));
+        } else if (body && typeof body === 'object' && body.error) {
+          setPaymentError(String(body.error));
+        } else {
+          setPaymentError(err.message || 'Failed to record invoice payment.');
+        }
+      } else {
+        setPaymentError(err instanceof Error ? err.message : String(err));
+      }
+    }
+  }
+
   // Client-side text search over fetched page
   const filteredInvoices = useMemo(() => {
     const q = debouncedSearch.toLowerCase().trim();
@@ -149,15 +233,25 @@ export default function InvoicesPage() {
             </p>
           </div>
 
-          {/* Action button */}
-          <button
-            type="button"
-            id="open-new-supplier-invoice-btn"
-            className="btn btn-primary"
-            onClick={() => setIsSupplierModalOpen(true)}
-          >
-            + New Supplier Invoice
-          </button>
+          {/* Action buttons */}
+          <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+            <button
+              type="button"
+              id="open-new-supplier-invoice-btn"
+              className="btn btn-ghost"
+              onClick={() => setIsSupplierModalOpen(true)}
+            >
+              📥 + Supplier Invoice
+            </button>
+            <button
+              type="button"
+              id="open-new-customer-invoice-btn"
+              className="btn btn-primary"
+              onClick={() => setIsCustomerModalOpen(true)}
+            >
+              📤 + Customer Invoice
+            </button>
+          </div>
         </div>
       </div>
 
@@ -471,15 +565,29 @@ export default function InvoicesPage() {
 
                     {/* Action */}
                     <td style={{ padding: 'var(--space-3) var(--space-4)', textAlign: 'right' }}>
-                      <button
-                        type="button"
-                        id={`view-invoice-${inv.id}`}
-                        className="btn btn-ghost"
-                        style={{ padding: 'var(--space-1) var(--space-3)', fontSize: 'var(--text-xs)' }}
-                        onClick={() => handleOpenDetail(inv.id)}
-                      >
-                        View Details
-                      </button>
+                      <div style={{ display: 'inline-flex', gap: 'var(--space-1)' }}>
+                        {inv.status === 'unpaid' && (
+                          <button
+                            type="button"
+                            id={`pay-invoice-${inv.id}`}
+                            className="btn btn-ghost"
+                            style={{ padding: 'var(--space-1) var(--space-2)', fontSize: 'var(--text-xs)', color: 'var(--color-success)' }}
+                            onClick={() => handleOpenPaymentModal(inv)}
+                            title="Mark this invoice as paid"
+                          >
+                            Mark Paid
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          id={`view-invoice-${inv.id}`}
+                          className="btn btn-ghost"
+                          style={{ padding: 'var(--space-1) var(--space-3)', fontSize: 'var(--text-xs)' }}
+                          onClick={() => handleOpenDetail(inv.id)}
+                        >
+                          Details
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -546,15 +654,28 @@ export default function InvoicesPage() {
                 </div>
               </div>
 
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={handleCloseDrawer}
-                aria-label="Close invoice drawer"
-                style={{ padding: 'var(--space-2) var(--space-3)' }}
-              >
-                ✕
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                {drawerDetail && drawerDetail.status === 'unpaid' && (
+                  <button
+                    type="button"
+                    id="mark-paid-drawer-btn"
+                    className="btn btn-primary"
+                    style={{ padding: 'var(--space-2) var(--space-4)', fontSize: 'var(--text-xs)' }}
+                    onClick={() => handleOpenPaymentModal(drawerDetail)}
+                  >
+                    ✓ Mark Paid
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={handleCloseDrawer}
+                  aria-label="Close invoice drawer"
+                  style={{ padding: 'var(--space-2) var(--space-3)' }}
+                >
+                  ✕
+                </button>
+              </div>
             </div>
 
             {/* Loading / Error states */}
@@ -735,6 +856,118 @@ export default function InvoicesPage() {
         onClose={() => setIsSupplierModalOpen(false)}
         onSuccess={handleSupplierInvoiceSuccess}
       />
+
+      {/* ── New Customer Invoice Modal ── */}
+      <NewCustomerInvoiceModal
+        isOpen={isCustomerModalOpen}
+        onClose={() => setIsCustomerModalOpen(false)}
+        onSuccess={handleCustomerInvoiceSuccess}
+      />
+
+      {/* ── Mark Paid Confirmation Modal ── */}
+      {payingInvoice && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="mark-paid-modal-title"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 1200,
+            background: 'rgba(10, 10, 10, 0.7)',
+            backdropFilter: 'blur(4px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 'var(--space-4)',
+          }}
+          onClick={handleClosePaymentModal}
+        >
+          <div
+            style={{
+              width: '100%',
+              maxWidth: 480,
+              background: 'var(--color-bg)',
+              borderRadius: 'var(--radius-lg)',
+              boxShadow: 'var(--shadow-lg)',
+              padding: 'var(--space-6)',
+              border: '1px solid var(--color-border)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="mark-paid-modal-title" style={{ fontSize: 'var(--text-lg)', margin: 0, marginBottom: 'var(--space-2)' }}>
+              Mark Invoice as Paid
+            </h3>
+            <p style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)', marginBottom: 'var(--space-4)' }}>
+              Record settlement for Invoice <strong>{payingInvoice.invoice_no}</strong> ({payingInvoice.party_name}).
+            </p>
+
+            {paymentError && (
+              <div className="alert alert-error" style={{ marginBottom: 'var(--space-4)' }}>
+                <span>{paymentError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleConfirmPayment}>
+              <div className="card" style={{ padding: 'var(--space-3)', marginBottom: 'var(--space-4)', background: 'var(--color-surface-2)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--text-xs)', marginBottom: 'var(--space-1)' }}>
+                  <span style={{ color: 'var(--color-text-muted)' }}>Type:</span>
+                  <strong>{payingInvoice.direction === 'received' ? 'Supplier Payment' : 'Customer Collection'}</strong>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--text-xs)', marginBottom: 'var(--space-1)' }}>
+                  <span style={{ color: 'var(--color-text-muted)' }}>Amount:</span>
+                  <strong style={{ color: 'var(--color-primary)' }}>{formatMoney(payingInvoice.total, user?.role)}</strong>
+                </div>
+              </div>
+
+              <div className="form-field" style={{ marginBottom: 'var(--space-5)' }}>
+                <label className="form-label" htmlFor="paid-on-date-input">
+                  Settlement Date (paid_on) *
+                </label>
+                <input
+                  id="paid-on-date-input"
+                  type="date"
+                  className="input"
+                  value={paidOnDate}
+                  max={getTodayString()}
+                  disabled={paymentSubmitting}
+                  onChange={(e) => setPaidOnDate(e.target.value)}
+                  required
+                />
+                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-subtle)' }}>
+                  Cannot be in the future.
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-2)' }}>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={handleClosePaymentModal}
+                  disabled={paymentSubmitting}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  id="confirm-mark-paid-btn"
+                  className="btn btn-primary"
+                  disabled={paymentSubmitting}
+                >
+                  {paymentSubmitting ? (
+                    <>
+                      <span className="spinner" style={{ width: 14, height: 14 }} />
+                      <span>Recording Payment...</span>
+                    </>
+                  ) : (
+                    'Confirm Paid'
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

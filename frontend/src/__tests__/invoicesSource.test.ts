@@ -3,10 +3,13 @@ import {
   fetchInvoices,
   fetchInvoiceById,
   createSupplierInvoice,
+  createCustomerInvoice,
+  markInvoicePayment,
   computeInvoiceTotals,
   InvoiceListItem,
   InvoiceDetail,
   CreateSupplierInvoicePayload,
+  CreateCustomerInvoicePayload,
 } from '../data/invoicesSource';
 import { api } from '../api/client';
 
@@ -177,7 +180,7 @@ describe('invoicesSource — Data fetching, creation & role policy', () => {
   });
 
   describe('createSupplierInvoice', () => {
-    const samplePayload: CreateSupplierInvoicePayload = {
+    const sampleSupplierPayload: CreateSupplierInvoicePayload = {
       party_id: 2,
       invoice_no: 'INV-SUP-2026-999',
       invoice_date: '2026-11-04',
@@ -207,9 +210,9 @@ describe('invoicesSource — Data fetching, creation & role policy', () => {
         lines_recorded: 1,
       });
 
-      const res = await createSupplierInvoice(samplePayload, 'admin');
+      const res = await createSupplierInvoice(sampleSupplierPayload, 'admin');
 
-      expect(apiSpy).toHaveBeenCalledWith('/api/invoices/supplier', samplePayload);
+      expect(apiSpy).toHaveBeenCalledWith('/api/invoices/supplier', sampleSupplierPayload);
       expect(res.invoice_id).toBe(42);
       expect(res.invoice_no).toBe('INV-SUP-2026-999');
     });
@@ -217,8 +220,87 @@ describe('invoicesSource — Data fetching, creation & role policy', () => {
     it('rejects creation attempt by non-admin users without sending request', async () => {
       const apiSpy = vi.spyOn(api, 'post');
 
-      await expect(createSupplierInvoice(samplePayload, 'staff')).rejects.toThrow(
+      await expect(createSupplierInvoice(sampleSupplierPayload, 'staff')).rejects.toThrow(
         /Unauthorized: Only administrators can record supplier invoices/
+      );
+      expect(apiSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('createCustomerInvoice', () => {
+    const sampleCustomerPayload: CreateCustomerInvoicePayload = {
+      party_id: 4,
+      invoice_no: 'INV-CUST-2026-888',
+      rental_id: 1,
+      invoice_date: '2026-11-04',
+      due_date: '2026-12-04',
+      subtotal: 1000.0,
+      vat_amount: 150.0,
+      total: 1150.0,
+      notes: 'Monthly crane rental invoice',
+      file_url: 'invoices/billing-888.pdf',
+      lines: [
+        {
+          description: 'Rough Terrain Crane 50T - Monthly Rental',
+          item_id: null,
+          quantity: 1,
+          unit_id: 1,
+          unit_price: 1000.0,
+        },
+      ],
+    };
+
+    it('posts customer invoice payload for admin', async () => {
+      const apiSpy = vi.spyOn(api, 'post').mockResolvedValueOnce({
+        message: 'Customer invoice recorded successfully',
+        invoice_id: 43,
+        invoice_no: 'INV-CUST-2026-888',
+        direction: 'issued',
+        lines_recorded: 1,
+      });
+
+      const res = await createCustomerInvoice(sampleCustomerPayload, 'admin');
+
+      expect(apiSpy).toHaveBeenCalledWith('/api/invoices/customer', sampleCustomerPayload);
+      expect(res.invoice_id).toBe(43);
+      expect(res.invoice_no).toBe('INV-CUST-2026-888');
+    });
+
+    it('rejects customer invoice creation by non-admin users without sending request', async () => {
+      const apiSpy = vi.spyOn(api, 'post');
+
+      await expect(createCustomerInvoice(sampleCustomerPayload, 'staff')).rejects.toThrow(
+        /Unauthorized: Only administrators can record customer invoices/
+      );
+      expect(apiSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('markInvoicePayment', () => {
+    it('sends PATCH request to record invoice payment for admin', async () => {
+      const apiSpy = vi.spyOn(api, 'patch').mockResolvedValueOnce({
+        message: 'Invoice marked as paid successfully',
+        invoice_id: 1,
+        invoice_no: 'INV-SUP-001',
+        status: 'paid',
+        paid_on: '2026-11-04',
+        paid_by: 1,
+      });
+
+      const res = await markInvoicePayment(1, '2026-11-04', 'admin');
+
+      expect(apiSpy).toHaveBeenCalledWith('/api/invoices/1/payment', {
+        paid_on: '2026-11-04',
+      });
+      expect(res.status).toBe('paid');
+      expect(res.paid_on).toBe('2026-11-04');
+    });
+
+    it('rejects mark invoice payment by non-admin users without sending request', async () => {
+      const apiSpy = vi.spyOn(api, 'patch');
+
+      await expect(markInvoicePayment(1, '2026-11-04', 'staff')).rejects.toThrow(
+        /Unauthorized: Only administrators can record invoice payments/
       );
       expect(apiSpy).not.toHaveBeenCalled();
     });

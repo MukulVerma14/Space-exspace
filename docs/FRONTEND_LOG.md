@@ -770,3 +770,84 @@ npm run dev:frontend   # http://localhost:5173
 ### 30-Second Explanation
 
 > Administrators can now record received supplier invoices through a responsive modal with dynamic line items. Typing in the item search field debounces across the material catalog and auto-fills descriptions and unit specifications. Subtotal, 15% VAT, and total amounts are previewed in real-time while submitting delegates final reconciliation to the server. Double-submissions are prevented while requests are in flight, and server rejections (such as duplicate invoice numbers or precision mismatches) are displayed in a clear error alert.
+
+
+---
+
+## F-I4 — "New Customer Invoice" Form & "Mark Paid" Action
+
+**Date:** 2026-11-04  
+**Status:** ✅ Complete
+
+---
+
+### What Was Built
+
+| File | Purpose |
+|---|---|
+| `frontend/src/components/NewCustomerInvoiceModal.tsx` | Modal form for recording issued customer invoices: customer party selection (seeded presets or custom ID), optional linked rental contract ID (`rental_id`), invoice dates, plain-text file reference, dynamic line items with optional debounced material search or custom service descriptions, computed totals preview, and clear server error formatting. |
+| `frontend/src/data/invoicesSource.ts` | Added `createCustomerInvoice` and `markInvoicePayment` API callers, with strict Admin-role authorization guards. |
+| `frontend/src/pages/admin/InvoicesPage.tsx` | Added "+ Customer Invoice" trigger button, "Mark Paid" action in the invoice detail drawer and table rows, settlement date modal, and automatic list re-fetch + drawer state sync upon completion. |
+| `frontend/src/__tests__/invoicesSource.test.ts` | Unit tests verifying `createCustomerInvoice` and `markInvoicePayment` payload submission and non-admin rejection without network requests (38/38 tests passing). |
+
+---
+
+### Why — Key Design Decisions
+
+#### 1. Store-Only Customer Invoicing Workflow
+**Decision:** Customer invoices use a store-only recording workflow (`POST /api/invoices/customer`). No generation or ZATCA XML is triggered. Unlike supplier invoices, customer invoices never generate stock receipts.  
+**Why:** Directly aligns with confirmed client requirements: commercial invoices are stored for billing audits, equipment rentals, and margin analysis without coupling to external tax agency gateways in Phase 1.
+
+#### 2. "Mark Paid" Settlement Action
+**Decision:** Both received and issued invoices can be marked paid via `PATCH /api/invoices/:id/payment`. A modal dialog prompts for the settlement date (`paid_on`, defaulting to today and disallowing future dates).  
+**Why:** Captures payment reconciliation with clear audit metadata (`paid_by` and `paid_on`) while preventing erroneous future dates.
+
+#### 3. Foreign Rental & Duplicate Validation Feedback
+**Decision:** The UI surfaces specific server rejections in prominent alert banners:
+- Foreign Rental (400): If a `rental_id` belongs to a different customer than selected, the server's exact message is displayed.
+- Duplicate (409): Flags identical invoice numbers for the same customer.  
+**Why:** Prevents accounting mix-ups where billing records are attached to unrelated rental contracts.
+
+#### 4. Dynamic Billing Lines with Optional Item Linking
+**Decision:** Lines can either link to a material item (auto-populating SKU and unit specifications via debounced search) or serve as free-text rental/service descriptions.  
+**Why:** Customer invoices frequently bill for time-based equipment rentals or services rather than discrete inventory items.
+
+#### 5. Strict Zero-Money-For-Staff & Plain-Text File References
+**Decision:** Gated entirely to administrators. File references (`file_url`) remain plain text strings in inputs, tables, and drawers, avoiding clickable or executable URL schemes.  
+**Why:** Strict XSS prevention and absolute protection of commercial pricing margins from field staff.
+
+---
+
+### How to Test F-I4
+
+**1. Automated tests**
+```bash
+npm run test:frontend
+# 38/38 tests pass (including 13 in invoicesSource.test.ts)
+npm run build:frontend
+# tsc && vite build succeeds with exit code 0
+```
+
+**2. Manual testing checklist**
+```bash
+npm run dev:frontend   # http://localhost:5173
+```
+
+| Role | Test Step | Expected Result |
+|---|---|---|
+| Admin | Log in as admin (`admin@space-exs.com`) → Invoices page (`/admin/invoices`) | Both "+ Supplier Invoice" and "+ Customer Invoice" buttons are visible in the header. |
+| Admin | Click "+ Customer Invoice" | Modal opens with Customer Party selector, Invoice #, Rental ID (optional), Dates, File Ref, and line items. |
+| Admin | Select Customer: "Apex Infrastructure Partners (ID: 4)", Invoice #: "INV-CUST-2026-001" | Form fields update. |
+| Admin | In Line 1, type description: "Crane Rental Fee", Qty: 1, Unit Price: 1000 | Line total shows `1,000.00 SAR`. Computed Subtotal shows `1,000.00 SAR`, VAT (15%) shows `150.00 SAR`, Total shows `1,150.00 SAR`. |
+| Admin | Click "Record Customer Invoice" | Submit button displays spinner and "Recording Invoice...". On success, modal closes, green success banner appears, list re-fetches, and invoice opens in detail drawer. |
+| Admin | Open unpaid invoice in detail drawer | "✓ Mark Paid" button is visible in the drawer header. |
+| Admin | Click "✓ Mark Paid" | Modal prompts for settlement date (defaults to today). Future dates are blocked. |
+| Admin | Click "Confirm Paid" | Button changes to "Recording Payment..." with spinner. On success, modal closes, status updates to "Paid", `paid_on` is displayed, and "Mark Paid" button disappears. |
+| Admin | On main invoices list | Table row for the invoice shows green "Paid" badge. |
+| Staff | Log in as staff | Invoices page remains completely inaccessible (redirects to `/staff`). Zero invoice or money data is accessible. |
+
+---
+
+### 30-Second Explanation
+
+> Administrators can now record issued customer billing invoices with dynamic line items linked either to catalog items or custom equipment rental services. Subtotals, VAT, and totals reconcile with the server, which strictly guards against duplicate numbers and mismatched rental IDs. Any unpaid invoice (received or issued) can be marked as paid through a verified settlement action with audit logging. Staff remain barred from accessing commercial invoices, and file references remain secure plain text.
