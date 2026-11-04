@@ -1742,3 +1742,65 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    npm run build:frontend
    ```
    *Expected Result*: Static bundle compiles with 0 errors.
+
+---
+
+## Step 10: Post-Merge Integration Review and Blocker Remediation
+
+### What we reviewed & built:
+1. **End-to-End Post-Merge Integration Audit**:
+   - Produced [`docs/INTEGRATION_REVIEW.md`](INTEGRATION_REVIEW.md) covering all 6 system dimensions:
+     - **Contract**: Verified every frontend API call against [`docs/API.md`](API.md) (paths, payloads, response schemas, and 401/403 behavior).
+     - **Security**: Audited JWT storage in `localStorage`, verified zero `dangerouslySetInnerHTML`, confirmed strict exclusion of financial and money fields for staff, validated IndexedDB session/snapshot wiping on logout, and verified per-user cache key isolation (`${userId}:${name}`).
+     - **Offline Architecture**: Audited client clock skew offset calibration (`Delta t = server_time - client_now`), UUID v4 entropy, IndexedDB outbox persistence, single-flight sync concurrency lock, exponential backoff with randomized jitter, 401 halt behavior, rejected event review panel in `OutboxBadge`, and offline polling suppression.
+     - **Request Leaks**: Confirmed zero interval polling, verified effect hook teardowns, and verified 300ms debounce across search inputs and invoice modals.
+     - **Feature Status Table**: Benchmarked completeness of F1 through F-O4 and F-I1 through F-I4.
+     - **Code Hygiene**: Audited leftover mock arrays, hardcoded credentials, console logging discipline, and README execution steps.
+2. **Remediated Blocker 1: `PATCH /api/invoices/:id/payment` Response Contract Drift**:
+   - **Root Cause**: Backend `invoicesController.ts` and `docs/API.md` (Endpoint 25) return `{ message: string, data: { id, direction, invoice_no, status, paid_on, paid_by } }`. The frontend client interface `MarkInvoicePaymentResponse` defined flat properties, causing `res.invoice_no` and `res.paid_on` to evaluate to `undefined` and rendering corrupted audit notices (`Invoice 'undefined' marked as paid on undefined.`).
+   - **Resolution**:
+     - Updated `frontend/src/data/invoicesSource.ts` to align `MarkInvoicePaymentResponse` with the `data` payload wrapper schema.
+     - Updated `frontend/src/pages/admin/InvoicesPage.tsx` to read `res.data.invoice_no` and `res.data.paid_on` with resilient fallbacks.
+     - Updated `frontend/src/__tests__/invoicesSource.test.ts` to verify the contract schema and assert against `res.data`.
+     - Verified all 38 frontend tests pass and production build compiles with exit code 0.
+
+### Why it exists:
+- **Contract Fidelity between Front and Back**: A drift between client TypeScript interfaces and actual server JSON envelopes leads to silent `undefined` references in UI notifications and audit alerts.
+- **Accurate Operational Confirmation**: When an administrator records a payment settlement on an issued or received invoice, immediate visual feedback confirming the exact invoice number and settlement date is essential for accounting confidence.
+
+### Why this way:
+- **Contract Realignment over Server Reshaping**:
+  - *Alternative 1 Rejected (Flattening the server response in `invoicesController.ts`)*: The server already follows the standard REST envelope format `{ message, data: { ... } }` documented in `docs/API.md` and verified in backend integration tests. Changing the backend response would break backend contract tests and external API integrators. Correcting the frontend TypeScript interface and component consumer restores universal contract compliance.
+
+### How it works:
+1. When an administrator clicks "✓ Mark Paid" on an unpaid invoice in `InvoicesPage.tsx`:
+   - The settlement modal prompts for the payment date (`paid_on`, defaulting to today and disallowing future dates).
+   - Upon confirmation, `markInvoicePayment()` executes `PATCH /api/invoices/:id/payment`.
+   - The server marks the invoice as `paid`, records `paid_on` and `paid_by`, and returns `{ message: '...', data: { id, direction, invoice_no, status, paid_on, paid_by } }`.
+   - `InvoicesPage.tsx` reads `res.data.invoice_no` and `res.data.paid_on`, displaying: `Invoice 'INV-SE-2026-0099' marked as paid on 2026-11-04.`.
+   - The list re-fetches and the detail drawer updates dynamically to reflect the paid state.
+
+### Concepts used:
+- **Contract Testing & API Envelope Alignment**: Ensuring client serialization layers strictly model the server's envelope structure (`data` wrapper).
+- **Graceful Nullish Coalescing Fallbacks**: Using `res.data?.invoice_no ?? payingInvoice.invoice_no` so UI notifications remain robust even during degraded edge cases.
+- **Zero-Trust Role Gating**: Enforcing that only administrators can access commercial settlement endpoints on both the client and server.
+
+### Risks and assumptions:
+- **Assumption**: The client's clock offset remains calibrated via HTTP `Date` headers on each request, ensuring `paid_on` dates default accurately to the server's calendar day.
+
+### 30-second explanation:
+> *"We conducted an exhaustive post-merge integration review across contract, security, offline, request leaks, feature status, and code hygiene, documenting all findings in docs/INTEGRATION_REVIEW.md. We identified one contract blocker in the invoice payment settlement response: the frontend expected flat properties while the server wrapped attributes in a 'data' object, causing undefined strings in audit confirmation notices. We aligned the interface, updated InvoicesPage to read the data envelope, updated the test suite, verified all 38 frontend tests pass, and confirmed clean production bundling."*
+
+### How to verify:
+1. Run frontend test suite:
+   ```bash
+   npm run test:frontend
+   ```
+   *Expected Result*: All 5 test suites pass cleanly (**38 / 38 tests passed**, including all 13 in `invoicesSource.test.ts`).
+2. Run frontend production build:
+   ```bash
+   npm run build:frontend
+   ```
+   *Expected Result*: TypeScript compiler and Vite bundle with exit code 0.
+3. Review audit findings:
+   Inspect [`docs/INTEGRATION_REVIEW.md`](INTEGRATION_REVIEW.md) for the detailed findings across all 6 dimensions.

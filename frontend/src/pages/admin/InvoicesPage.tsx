@@ -166,7 +166,9 @@ export default function InvoicesPage() {
       const res = await markInvoicePayment(payingInvoice.id, paidOnDate, user?.role);
       setPaymentSubmitting(false);
       setPayingInvoice(null);
-      setSuccessNotice(`Invoice '${res.invoice_no}' marked as paid on ${res.paid_on}.`);
+      const paidNo = res.data?.invoice_no ?? payingInvoice.invoice_no;
+      const paidOnStr = res.data?.paid_on ?? paidOnDate;
+      setSuccessNotice(`Invoice '${paidNo}' marked as paid on ${paidOnStr}.`);
 
       // Refresh list
       loadInvoices();

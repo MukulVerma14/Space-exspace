@@ -1,6 +1,6 @@
 # SPACE EXSPACE — Post-Merge Integration Review
 
-**Date**: 2026-10-30  
+**Date**: 2026-11-04  
 **Status**: Completed  
 **Scope**: Full end-to-end integration audit across Frontend (`frontend/src`), Backend (`backend/src`), and Architecture Specifications (`docs/API.md`, `docs/ARCHITECTURE.md`).  
 
@@ -8,11 +8,15 @@
 
 ## Executive Summary
 
-A comprehensive post-merge integration review was conducted across the SPACE EXSPACE codebase. The platform exhibits robust foundations in database constraints, rate stripping, append-only ledgers, role enforcement, and modular frontend structure. However, there are **three critical blockers** at the integration boundary between the frontend offline subsystem and the backend sync/equipment APIs:
+A comprehensive post-merge integration review was conducted across the SPACE EXSPACE codebase following the completion of features F1 through F-O4 and F-I1 through F-I4. The platform exhibits robust foundations in database constraints, rate stripping, append-only ledgers, role enforcement, and modular frontend structure. 
 
-1. **[BLOCKER] Disconnected Offline Sync Endpoint & Protocol**: The frontend sync client (`syncClient.ts`) is currently a mock targeting a nonexistent mock URL (`POST /api/sync/events`) with an incompatible payload schema (`{ accepted: string[], rejected: [] }`) instead of the real backend endpoint (`POST /api/sync`) which returns `{ processed: number, results: SyncPerEventResult[] }`.
-2. **[BLOCKER] Missing Client Clock Skew Compensation**: `docs/API.md` (Endpoint 24) explicitly requires the client to compute $\Delta t = \text{server\_time} - \text{client\_now}$ from `/api/sync/snapshot` and calibrate `occurred_at`. The frontend outbox (`outbox.ts`) records raw local device time, causing rejection (`CLOCK_SKEW_EXCEEDED`) whenever the technician's device clock drifts > 5 minutes.
-3. **[BLOCKER] Equipment Contract & Unhandled Live Fetch Failure**: `docs/API.md` documents `data` and `total_pages` for `GET /api/equipment`, whereas `equipmentController.ts` outputs `{ items, pagination: { totalPages, hasNext, ... } }`. Furthermore, `equipmentSource.ts` silently falls back to snapshot cache on network errors without notifying the user of degraded/stale state.
+The audit evaluated six specific dimensions:
+1. **Contract Integrity**: Every frontend API call verified against `docs/API.md`.
+2. **Security Posture**: JWT storage, XSS exposure, financial redaction for staff, logout wipe, and cache scoping.
+3. **Offline & Sync Protocol**: Client clock calibration, UUIDs, outbox durability, concurrency locks, jittered backoff, 401 handling, rejection review, and offline polling guards.
+4. **Request Leaks & Performance**: Polling intervals, effect hooks, debounce coverage, and inflight deduplication.
+5. **Feature Completeness**: Status matrix of F1 through F-O4 and F-I1 through F-I4.
+6. **Code Hygiene**: Mock artifacts, hardcoded credentials, logging hygiene, dead code, and run documentation.
 
 ---
 
@@ -20,233 +24,204 @@ A comprehensive post-merge integration review was conducted across the SPACE EXS
 
 | Severity | Count | Summary |
 |---|:---:|---|
-| **Blocker** | 3 | Disconnected sync client mock, uncompensated client clock skew, equipment API contract drift & silent catch |
-| **Major** | 3 | Sequential 200-page burst on live equipment fetch, JWT in `localStorage` without CSRF/XSS defense, generic 403 handling |
-| **Minor** | 3 | Incomplete frontend run steps in root README, mock data file leftover (`equipmentMock.ts`), missing continuous scanner debounce |
+| **Blocker** | 1 | Contract response payload wrapper mismatch on `PATCH /api/invoices/:id/payment` (`invoicesSource.ts` / `InvoicesPage.tsx`) causing `undefined` invoice numbers in audit confirmations. |
+| **Major** | 3 | Sequential fleet pagination cold start burst (`equipmentSource.ts`), JWT in `localStorage` without CSRF/XSS defense, lack of fine-grained 403 alert dialogs. |
+| **Minor** | 5 | Client clock offset not reset on logout, missing continuous camera scanner debounce, leftover dead mock data (`equipmentMock.ts`), unused dev hook export (`simulateNext401`), README run step clarifications. |
 
 ---
 
 ## 1. Contract Review (Frontend vs `docs/API.md`)
 
-### Endpoint Audit
+### Endpoint Audit Table
 
-#### A. `POST /api/auth/login`
-- **Frontend Caller**: `frontend/src/api/client.ts` -> `loginRequest(email, password)`
-- **Backend Handler**: `backend/src/controllers/authController.ts` -> `login`
-- **Contract Status**: **MATCH (PASS)**
-- **Findings**:
-  - Request format matches `{ email, password }`.
-  - Response parses `{ token, user: { id, name, email, role } }`.
-  - Rate limiting (429) and bad credentials (401) error messages are propagated to the login UI.
+| # | Endpoint & Method | Frontend Caller File | Backend Controller | Status | Contract Finding / Details |
+|---|---|---|---|:---:|---|
+| 1 | `POST /api/auth/login` | `frontend/src/api/client.ts` (`loginRequest`) | `backend/src/controllers/authController.ts` (`login`) | **PASS** | Exact match. Request `{ email, password }` parses `{ token, user }`. Rate limiting (429) and invalid credentials (401) errors propagated cleanly. |
+| 2 | `GET /api/auth/me` | `frontend/src/api/client.ts` (`meRequest`) | `backend/src/controllers/authController.ts` (`me`) | **PASS** | Exact match. Returns `{ user: { id, name, email, role } }`. 401 triggers session purge in `AuthContext.tsx`. |
+| 3 | `GET /api/equipment` | `frontend/src/data/equipmentSource.ts` (`fetchLiveEquipment`) | `backend/src/controllers/equipmentController.ts` (`listEquipment`) | **PASS** | Exact match. Queries `page` and `limit`. Parses `{ items, pagination: { page, limit, total, totalPages, hasNext, hasPrev } }`. Live failure sets `error` notice and falls back to snapshot. |
+| 4 | `GET /api/materials` | `frontend/src/data/materialsSource.ts` (`loadMaterials`) | `backend/src/controllers/materialsController.ts` (`listMaterials`) | **PASS** | Exact match. Queries `category_id`, `low_stock`, `q`. Parses `{ data: MaterialItem[] }`. Offline or network failure gracefully falls back to cached snapshot. |
+| 5 | `GET /api/materials/:id/price-history` | `frontend/src/data/materialsSource.ts` (`fetchMaterialPriceHistory`) | `backend/src/controllers/materialsController.ts` (`getMaterialPriceHistory`) | **PASS** | Exact match. Admin-only. Server returns 403 for staff; frontend additionally enforces client-side check. Parses `{ item_id, price_history, valuation }`. Receipts from voided invoices are filtered. |
+| 6 | `GET /api/materials/:id/movements` | `frontend/src/data/materialsSource.ts` (`fetchMaterialMovements`) | `backend/src/controllers/materialsController.ts` (`getMaterialMovements`) | **PASS** | Exact match. Accessible to admin and staff. Backend scrubs `unit_cost` for staff via `sanitizeFinancials()`. Returns `{ data: MaterialMovement[] }`. |
+| 7 | `GET /api/invoices` | `frontend/src/data/invoicesSource.ts` (`fetchInvoices`) | `backend/src/controllers/invoicesController.ts` (`listInvoices`) | **PASS** | Exact match. Admin-only. Supports `direction`, `status`, `party_id`, `page`, `limit`. Parses `{ data, pagination: { page, limit, total, total_pages } }`. |
+| 8 | `GET /api/invoices/:id` | `frontend/src/data/invoicesSource.ts` (`fetchInvoiceById`) | `backend/src/controllers/invoicesController.ts` (`getInvoiceById`) | **PASS** | Exact match. Admin-only. Parses `{ data: { ...invoice, lines } }`. File references are handled strictly as plain text. |
+| 9 | `POST /api/invoices/supplier` | `frontend/src/data/invoicesSource.ts` (`createSupplierInvoice`) | `backend/src/controllers/invoicesController.ts` (`createSupplierInvoice`) | **PASS** | Exact match. Admin-only. Sends full invoice header with line items. Backend recalculates subtotal with `decimal.js` and updates material price history and stock receipts. Duplicate returns 409. |
+| 10 | `POST /api/invoices/customer` | `frontend/src/data/invoicesSource.ts` (`createCustomerInvoice`) | `backend/src/controllers/invoicesController.ts` (`createCustomerInvoice`) | **PASS** | Exact match. Admin-only. Store-only workflow (zero stock movements). Verifies customer party, optional rental contract, and decimal math reconciliation. Returns 201 with computed totals. |
+| 11 | `PATCH /api/invoices/:id/payment` | `frontend/src/data/invoicesSource.ts` (`markInvoicePayment`) | `backend/src/controllers/invoicesController.ts` (`markInvoicePayment`) | **BLOCKER** | **Payload Wrapper Mismatch**: Backend returns `{ message, data: { id, direction, invoice_no, status, paid_on, paid_by } }`. Frontend interface `MarkInvoicePaymentResponse` expects flat fields (`invoice_no`, `paid_on`). In `InvoicesPage.tsx` line 169, `res.invoice_no` and `res.paid_on` evaluate to `undefined`. |
+| 12 | `POST /api/sync` | `frontend/src/sync/syncClient.ts` (`sendBatch`) | `backend/src/controllers/syncController.ts` (`processSyncBatch`) | **PASS** | Exact match. Transforms frontend outbox events into `{ events: [...] }` payload. Parses `{ processed, results }`. Correctly splits `accepted` and `rejected` IDs. Propagates 401 for sync manager halt. |
 
-#### B. `GET /api/auth/me`
-- **Frontend Caller**: `frontend/src/api/client.ts` -> `meRequest()`
-- **Backend Handler**: `backend/src/controllers/authController.ts` -> `me`
-- **Contract Status**: **MATCH (PASS)**
-- **Findings**:
-  - Validates active token, returning `{ user }`.
-  - Frontend boots offline session from IndexedDB cache if network fails, or purges session on 401.
-
-#### C. `GET /api/equipment`
-- **Frontend Caller**: `frontend/src/data/equipmentSource.ts` -> `fetchLiveEquipment()`
-- **Backend Handler**: `backend/src/controllers/equipmentController.ts` -> `listEquipment`
-- **Docs**: `docs/API.md` Endpoint 6
-- **Contract Status**: **[BLOCKER] Contract Field Drift & Silent Catch**
-- **Findings**:
-  - **Field Mismatch**: `docs/API.md` specifies response root `{ data: [...], pagination: { page, limit, total, total_pages } }`. The backend implementation in `equipmentController.ts` actually returns `{ items: [...], pagination: { page, limit, total, totalPages, hasNext, hasPrev } }`.
-  - While `equipmentSource.ts` aligns with the backend code's `items`, the divergence from `docs/API.md` creates a broken contract for external integrators.
-  - **Error Suppression**: In `equipmentSource.ts`:
-    ```ts
-    try {
-      const items = await fetchLiveEquipment();
-      await saveSnapshot(userId, SNAPSHOT_NAME, items);
-      return { items, source: 'live', savedAt: new Date().toISOString() };
-    } catch {
-      // Network or server error mid-load: fall through to the snapshot.
-    }
-    ```
-    If the backend returns a 500 error or authentication error, the frontend silently swallows the error and renders whatever is in IndexedDB without indicating an error occurred.
-
-#### D. `GET /api/sync/snapshot`
-- **Frontend Caller**: Missing from `frontend/src`
-- **Backend Handler**: `backend/src/controllers/syncController.ts` -> `getSyncSnapshot`
-- **Docs**: `docs/API.md` Endpoint 24
-- **Contract Status**: **[BLOCKER] Missing Endpoint Integration**
-- **Findings**:
-  - The frontend never calls `GET /api/sync/snapshot`. Instead, `equipmentSource.ts` paginates through `GET /api/equipment` page-by-page.
-  - `GET /api/sync/snapshot` is designed specifically to provide atomic offline data (equipment, locations, materials) and crucially provides `server_time` for clock drift calibration.
-
-#### E. `POST /api/sync`
-- **Frontend Caller**: `frontend/src/sync/syncClient.ts`
-- **Backend Handler**: `backend/src/controllers/syncController.ts` -> `processSyncBatch`
-- **Docs**: `docs/API.md` Endpoint 25
-- **Contract Status**: **[BLOCKER] Endpoint Disconnected (Mock Implemented)**
-- **Findings**:
-  - `frontend/src/sync/syncClient.ts` does NOT make an HTTP request. It contains a mock timer (`setTimeout`) and hardcoded rejection logic for `send_to_repair`.
-  - Comments in `syncClient.ts` state `TODO(backend): replace with the real call once POST /api/sync/events exists`. The backend endpoint already exists at `POST /api/sync`.
-  - The request body expected by `syncController.ts`:
-    ```json
-    {
-      "events": [
-        {
-          "client_event_id": "<uuid>",
-          "user_id": <int>,
-          "type": "equipment.move" | "equipment.return" | "equipment.repair" | "material.goods_received" | "material.issue",
-          "payload": { ... },
-          "occurred_at": "<iso-timestamp>"
-        }
-      ]
-    }
-    ```
-  - The response returned by `syncController.ts`:
-    ```json
-    {
-      "processed": 1,
-      "results": [
-        {
-          "client_event_id": "<uuid>",
-          "status": "accepted" | "duplicate" | "rejected",
-          "result": { ... },
-          "error": "<error-code>",
-          "message": "<human-message>"
-        }
-      ]
-    }
-    ```
-  - The mock in `syncClient.ts` expects `{ accepted: string[], rejected: { id: string, reason: string }[] }`. These schemas are completely incompatible.
-
-#### F. Error Handling: 401 & 403 Behaviour
-- **401 Unauthorized**: Handled correctly across `AuthContext` and `syncManager`. On 401, `syncManager` stops syncing, flags `authExpired: true`, preserves the outbox, and alerts the user to re-authenticate.
-- **403 Forbidden**: [MAJOR] `client.ts` throws `ApiRequestError(403)`. `RequireAuth` redirects unprivileged users to `/admin` or `/staff`, but in-page actions lack fine-grained permission alert dialogs.
+### Error Handling & HTTP Status Code Behaviour
+- **401 Unauthorized**: Correctly handled across the entire client. In `AuthContext.tsx`, an expired token triggers automatic session wipe and redirects to `/login`. In `syncManager.ts`, receiving a 401 halts batch retries immediately, flags `authExpired: true`, preserves the outbox, and alerts the user.
+- **403 Forbidden**: [MAJOR] `client.ts` throws `ApiRequestError(403)`. While role guards redirect unprivileged staff attempting to access `/admin/*`, direct API calls lack dedicated permission alert modals and display the generic server error string.
 
 ---
 
 ## 2. Security Review
 
-### 2.1 JWT Storage & XSS Risk ([MAJOR])
-- **Current Implementation**: The JWT token is saved in browser `localStorage` under `sx_token` (`frontend/src/api/client.ts`).
-- **Risk Assessment**: Any successful Cross-Site Scripting (XSS) attack could access `localStorage` and exfiltrate credentials.
+### 2.1 JWT Storage & XSS Exposure ([MAJOR])
+- **Current State**: The JWT token is persisted in browser `localStorage` under `sx_token` (`frontend/src/api/client.ts`).
+- **Risk Assessment**: If a script injection occurs on the origin, tokens can be accessed via JavaScript.
 - **Mitigation & Future Work**:
-  - React's JSX escaping currently protects against HTML injection.
-  - The CSP configured in Caddy (`Step 6c`) restricts script origins.
-  - In production, transitioning to an `httpOnly`, `Secure`, `SameSite=Strict` cookie should be prioritized.
+  - React's JSX text node escaping provides default XSS mitigation.
+  - Zero raw HTML injection patterns exist in the frontend.
+  - Documented in `docs/OPEN_QUESTIONS.md`: Production architecture should migrate to `httpOnly`, `Secure`, `SameSite=Strict` cookies once backend cookie handling is provisioned.
 
 ### 2.2 `dangerouslySetInnerHTML` ([PASS])
-- Zero occurrences of `dangerouslySetInnerHTML` across all frontend code.
-- All DOM insertions use React's default text node encoding.
+- A codebase-wide scan confirmed **zero occurrences** of `dangerouslySetInnerHTML`.
+- All user input and dynamic content (including invoice file references and notes) are rendered via standard React text nodes.
 
-### 2.3 Financial Fields Leakage ([PASS])
-- Verification confirms that staff responses never receive money or rate fields.
-- Backend serializer `sanitizeFinancials()` scrubs `daily_rate`, `rates`, `final_agreed_rate`, `unit_cost`, and `amount` whenever `req.user.role === 'staff'`.
-- Frontend `MockEquipment` and card displays do not contain or request any financial data.
+### 2.3 Financial Fields Leakage for Staff ([PASS])
+- **Backend Serializer**: `sanitizeFinancials()` in `backend/src/serializers/rateSerializer.ts` physically strips `daily_rate`, `rates`, `rate_cards`, `unit_price`, `unit_cost`, `subtotal`, `vat_amount`, `total`, and `cost` whenever `req.user.role === 'staff'`.
+- **Client Layer**: 
+  - `formatMoney()` in `frontend/src/data/materialsSource.ts` strictly checks `if (userRole !== 'admin') return '';`.
+  - `MaterialsPage.tsx` renders price history tabs and valuation cards only when `user?.role === 'admin'`.
+  - `InvoicesPage.tsx` is completely barred from staff by `RequireAuth(role="admin")`.
 
-### 2.4 IndexedDB & Cache Wiped on Logout ([PASS])
-- `clearAllOfflineData()` in `frontend/src/offline/db.ts` wipes both `snapshots` and `session` object stores upon sign-out or when another user logs in on the same device.
-- Pending outbox actions are preserved across normal session expiration to prevent data loss, but are cleared if the user explicitly confirms "Sign out and discard".
+### 2.4 IndexedDB & Cache Cleared on Logout ([PASS])
+- `logout()` in `AuthContext.tsx` calls `wipeOfflineData()`, which invokes `clearAllOfflineData()` in `frontend/src/offline/db.ts`.
+- Wipes all records from the `snapshots` and `session` IndexedDB stores.
+- The `outbox` store is intentionally preserved on standard logout so field workers do not silently lose un-synced yard entries, but users are prompted if switching accounts.
+- `clearToken()` purges `sx_token` from `localStorage`.
 
 ### 2.5 Per-User Cache Keys ([PASS])
-- IndexedDB snapshot cache keys are formatted as `${userId}:${snapshotName}`.
-- Outbox events include an index on `byUser` (`userId`), ensuring `listEvents(userId)` strictly isolates one technician's events from another on a shared device.
+- Snapshot store keys are scoped by user ID: `${userId}:${name}` (`equipmentSource.ts` and `materialsSource.ts`).
+- Outbox store maintains an index `byUser` on `userId`, ensuring `listEvents(userId)` strictly isolates one technician's actions from another on shared mobile hardware.
 
 ---
 
 ## 3. Offline & Sync Protocol Review
 
-### 3.1 Client Clock Skew Correction ([BLOCKER])
-- **Requirement**: `docs/API.md` Endpoint 24 states:
-  $$\Delta t = \text{server\_time} - \text{client\_now}$$
-  Clients must add $\Delta t$ to local time when recording `occurred_at`.
-- **Finding**: `frontend/src/offline/outbox.ts` line 49 executes `occurredAt: new Date().toISOString()` without applying any clock offset.
-- **Impact**: If a technician's phone clock is set > 5 minutes ahead of server time, the backend `syncController.ts` clock skew check immediately rejects all queued events with `CLOCK_SKEW_EXCEEDED`.
+### 3.1 Client Clock Skew Compensation ([PASS])
+- **Requirement**: Prevent `CLOCK_SKEW_EXCEEDED` rejections when device time drifts > 5 minutes.
+- **Implementation**:
+  - `frontend/src/offline/clock.ts`: `calibrateClockFromServerTime()` computes $\Delta t = \text{server\_time} - \text{Date.now()}$.
+  - `frontend/src/api/client.ts`: Automatically calibrates $\Delta t$ on **every** HTTP response from the HTTP `Date` response header or body `server_time`.
+  - `frontend/src/offline/outbox.ts`: `enqueueEvent()` sets `occurredAt: getCalibratedNowIso()`, applying the calibrated offset.
+  - Persisted in `localStorage` (`sx_clock_offset_ms`) so offline dead zones retain accurate calibration.
 
 ### 3.2 UUID Per Event ([PASS])
-- `newEventId()` generates a standard RFC 4122 v4 UUID with cryptographic entropy (`crypto.randomUUID` with fallback to `crypto.getRandomValues`).
+- `newEventId()` in `frontend/src/offline/outbox.ts` generates RFC 4122 v4 UUIDs using `crypto.randomUUID()` with a cryptographically secure fallback (`crypto.getRandomValues`) for unencrypted local HTTP contexts.
 
 ### 3.3 Outbox Persistence ([PASS])
-- Events are persisted to IndexedDB store `outbox` before any network activity is attempted.
+- Events are persisted to IndexedDB store `outbox` (database `sx-offline`, version 2) before any network transmission is attempted.
 
 ### 3.4 Concurrency Guard ([PASS])
-- `syncManager.ts` enforces an `inFlight` module boolean guard. Multiple sync triggers (e.g. rapid network reconnection) cannot trigger overlapping requests.
+- `syncManager.ts` enforces a module-level `inFlight` boolean guard. Overlapping triggers (such as network flapping or rapid button clicks) are dropped while a sync batch is in flight.
 
 ### 3.5 Exponential Backoff with Jitter ([PASS])
-- `backoffDelay(attempt)` computes $2^n \times \text{BASE\_DELAY} \times (0.5 + \text{random})$ capped at 60s for up to 5 attempts.
+- `backoffDelay(attempt)` computes $\min(60000, 2000 \times 2^{\text{attempt}}) \times (0.5 + \text{random})$.
+- Capped at 5 attempts, after which syncing pauses until the next browser `online` event or manual retry.
 
-### 3.6 Rejection Visibility & Review ([PASS])
-- The `OutboxBadge.tsx` component displays rejected events in red with the server-supplied failure reason, offering an explicit "Discard" button.
+### 3.6 Rejection Visibility & User Review ([PASS])
+- Rejections returned by the backend (`status === 'rejected'`) are updated in IndexedDB with `status: 'rejected'` and `rejectReason`.
+- `OutboxBadge.tsx` displays rejected items in an expandable review drawer, offering a red warning tag, reason description, and an explicit "Discard" action.
 
 ### 3.7 Offline Polling Guard ([PASS])
-- Zero interval polling. Sync runs strictly upon app boot, browser `online` event, and manual user click.
+- Zero `setInterval` polling exists.
+- Sync runs strictly on app initialization (if online), browser `online` window events, and explicit manual trigger buttons.
+- All network fetches verify `navigator.onLine` before executing.
 
 ---
 
 ## 4. Request Leaks & Performance
 
 ### 4.1 Interval Polling ([PASS])
-- No `setInterval` loops exist in the frontend.
+- Confirmed zero occurrences of `setInterval` or recursive `setTimeout` polling loops in the frontend.
 
 ### 4.2 Effect Loops ([PASS])
-- All `useEffect` hooks include clean dependency arrays and cancellation flags (`cancelled = true`).
+- All `useEffect` hooks across `EquipmentListPage`, `MaterialsPage`, and `InvoicesPage` have clean dependency arrays and include `cancelled` booleans for in-flight cleanup.
 
-### 4.3 Search Debounce ([PASS])
-- `EquipmentListPage` debounces text input via `useDebounce(search, 300)` before filtering.
+### 4.3 Search Input Debounce ([PASS])
+- Debounced at 300ms via `useDebounce`:
+  - `EquipmentListPage.tsx`: Equipment search input.
+  - `MaterialsPage.tsx`: Material SKU and catalog search input.
+  - `NewSupplierInvoiceModal.tsx`: Dynamic line item search dropdown.
+  - `NewCustomerInvoiceModal.tsx`: Dynamic customer line search dropdown.
 
 ### 4.4 Camera Scanner Stream Debounce ([MINOR])
-- Dedicated QR camera scanner hook should ensure continuous video stream decodes are debounced to prevent duplicate outbox entries upon multi-frame detection.
+- Continuous video stream decoding is not yet hooked up to a physical camera feed. When a camera scanner component is added, decodes must be debounced to prevent duplicate events per video frame.
 
-### 4.5 Sequential Fleet Pagination Bursts ([MAJOR])
-- `fetchLiveEquipment` in `equipmentSource.ts` loops sequentially from page 1 to 200 requesting 100 items per page (`MAX_PAGES = 200`). For a 5,000 asset fleet, this produces 50 roundtrips on cold start. Migrating initial cache population to `GET /api/sync/snapshot` is recommended.
+### 4.5 Fleet Pagination Bursts ([MAJOR])
+- `fetchLiveEquipment` in `equipmentSource.ts` iterates sequentially across up to 200 pages (`MAX_PAGES = 200`, `limit = 100`). For a 5,000 asset fleet, this generates 50 sequential HTTP requests on first load. Migrating initial cold-start hydration to `GET /api/sync/snapshot` (Endpoint 27) with ETag caching is recommended.
 
 ---
 
-## 5. Feature Status Table (F1 through F-O4)
+## 5. Feature Status Table (F1 through F-O4 & F-I1 through F-I4)
 
-| Feature | Scope / Requirements | Status | Notes / Gaps |
+| Feature ID | Scope / Requirements | Status | Notes / Verification |
 |---|---|:---:|---|
-| **F1** | Scaffold, API Client, Login, Role Routing, `/me`, Logout | **DONE** | Fully verified against backend auth API. |
-| **F2** | Equipment List, Debounced Search, Status Filter | **PARTIAL** | UI works with mock/live fallback; response field naming discrepancies. |
-| **F-O1** | Installable PWA, Offline App Shell, Online/Offline Badge | **DONE** | Service worker caches static assets; offline indicator functions reactively. |
-| **F-O2** | IndexedDB Snapshot, Per-User Keying, Wipe on Logout | **DONE** | `sx-offline` database with `snapshots` and `session` stores working. |
-| **F-O3** | Outbox: Staff Actions Stored Locally First | **DONE** | Local persistence, UUID v4 generation, and rejection state management. |
-| **F-O4** | Sync Manager: Batch Send Queued Events to Server | **PARTIAL** | Manager orchestration (backoff, locks, 401 stop) is complete, but `syncClient.ts` is a mock that does not call `POST /api/sync`. |
+| **F1** | Scaffold, API Client, Login, Role Routing, `/me`, Logout | **DONE** | Full state machine (`booting → authenticated`), token management, and role-based redirect guards. |
+| **F2** | Equipment List, Debounced Search, Status Filter | **DONE** | Debounced search, status pills, live fetch with IndexedDB snapshot fallback and error notice. |
+| **F-O1** | Installable PWA, Offline App Shell, Online/Offline Badge | **DONE** | Service worker asset caching, Web App Manifest, reactive online badge with auto-fade. |
+| **F-O2** | IndexedDB Snapshot, Per-User Keying, Wipe on Logout | **DONE** | `sx-offline` database with `snapshots` and `session` stores; purged cleanly on sign-out. |
+| **F-O3** | Outbox: Staff Actions Stored Locally First | **DONE** | RFC 4122 UUID v4, calibrated `occurredAt`, durable storage, rejection review UI. |
+| **F-O4** | Sync Manager: Batch Send Queued Events to Server | **DONE** | Connected to real `POST /api/sync`; backoff with jitter, 401 halt, zero polling. |
+| **F-I1** | Materials Stock List, Low-Stock Badges, Price History | **DONE** | Stock on hand calculated from append-only ledger; admin price history & valuation; staff amounts scrubbed. |
+| **F-I2** | Invoices Page: Received/Issued Tabs, Detail Drawer, Badges | **DONE** | Paginated table, status filtering, detail drawer with line items, plain-text file references. |
+| **F-I3** | New Supplier Invoice Modal with Dynamic Lines | **DONE** | Dynamic line items, debounced catalog search, server authority decimal validation, duplicate 409 alerts. |
+| **F-I4** | New Customer Invoice Modal & Mark Paid Settlement Action | **DONE** | Customer invoice recording, rental ID linkage, settlement date modal, audit logging. |
 
 ---
 
 ## 6. Code Hygiene & Deployment
 
-### 6.1 Leftover Mock Data
-- `frontend/src/mocks/equipmentMock.ts` contains a static 10-item equipment array.
-- `syncClient.ts` contains simulated mock responses.
-- `OutboxBadge.tsx` contains dev-only event generator buttons (safely gated behind `import.meta.env.DEV`).
+### 6.1 Leftover Mock Data ([MINOR])
+- `frontend/src/mocks/equipmentMock.ts`: Contains `MOCK_EQUIPMENT` (175 lines of static mock items) that is never used at runtime (only the TypeScript interface `MockEquipment` is imported).
+- `frontend/src/sync/syncClient.ts`: Contains `simulateNext401()` which is a test utility exported into production code.
 
-### 6.2 Hardcoded URLs & Secrets
-- No hardcoded backend URLs or production credentials found in source files.
-- Demo passwords are gated strictly behind `import.meta.env.DEV` in `LoginPage.tsx`.
+### 6.2 Hardcoded URLs & Secrets ([PASS])
+- Zero hardcoded API base URLs or backend connection strings in frontend source files.
+- All API calls utilize relative `/api/*` paths routed via Vite dev proxy or production reverse proxy.
+- Demo credential pre-fills in `LoginPage.tsx` are strictly gated behind `import.meta.env.DEV`.
 
-### 6.3 Console Statements
-- Clean: only defensive `console.warn` and `console.error` logs in `db.ts` and `AuthContext.tsx`.
+### 6.3 Console Statements ([PASS])
+- No stray `console.log` debugging prints in production code.
+- Only defensive `console.warn` statements for IndexedDB quota errors and `console.error` for auth rehydration failures.
 
-### 6.4 README Run Steps ([MINOR])
-- Root `README.md` details backend setup, migrations, and seed commands, but lacks explicit commands for frontend development (`npm run dev:frontend`) and frontend build (`npm run build:frontend`).
+### 6.4 Dead Code ([MINOR])
+- Unused static array in `frontend/src/mocks/equipmentMock.ts`.
+
+### 6.5 README Run Steps ([MINOR])
+- Root `README.md` details environment configuration, migrations, seeds, and execution steps (`npm run dev`, `npm run dev:frontend`, `npm run dev:backend`).
+- All scripts match `package.json` workspaces.
 
 ---
 
 ## Prioritized Action Plan (Fixing Blockers Only)
 
-In accordance with instructions, only **Blocker** items will be remediated immediately, one by one, with verified tests:
+Following the strict rule to remediate **ONLY** items ranked as **Blocker**:
 
-1. **Fix Blocker 1: Connect `syncClient.ts` to `POST /api/sync`**:
-   - Replace mock `sendBatch` with real HTTP call to `POST /api/sync`.
-   - Map frontend outbox events to the backend schema:
-     `{ events: [{ client_event_id: e.id, user_id: e.userId, type: e.type, payload: { ...e.payload, asset_code: e.assetCode }, occurred_at: e.occurredAt }] }`.
-   - Parse `res.results`, mapping `status === 'accepted' | 'duplicate'` to `accepted` IDs, and `status === 'rejected'` to `rejected` items with `reason`.
-   - Add automated test verifying the live payload formatting and response parsing.
+### Remediating Blocker 1: Align `markInvoicePayment` Contract Response Schema
+1. **Root Cause**:
+   Backend `invoicesController.ts` and `docs/API.md` Endpoint 25 specify:
+   ```json
+   {
+     "message": "Invoice marked as paid successfully",
+     "data": {
+       "id": 5,
+       "direction": "issued",
+       "invoice_no": "INV-SE-2026-0099",
+       "status": "paid",
+       "paid_on": "2026-11-02",
+       "paid_by": 1
+     }
+   }
+   ```
+   Frontend `frontend/src/data/invoicesSource.ts` defines:
+   ```ts
+   export interface MarkInvoicePaymentResponse {
+     message: string;
+     invoice_id: number;
+     invoice_no: string;
+     status: 'paid';
+     paid_on: string;
+     paid_by: number;
+   }
+   ```
+   And `InvoicesPage.tsx` accesses `res.invoice_no` and `res.paid_on` directly, leading to `undefined` values in user audit notices.
 
-2. **Fix Blocker 2: Add Client Clock Skew Calibration in `outbox.ts`**:
-   - Provide an offset module/helper `setServerClockOffset(serverTimeIso)` and `getCalibratedIsoTime()`.
-   - Calculate $\Delta t = \text{Date.parse}(server\_time) - \text{Date.now()}$.
-   - Ensure `enqueueEvent` generates `occurredAt` using calibrated time so events are never rejected for `CLOCK_SKEW_EXCEEDED`.
-   - Add automated unit tests verifying that positive and negative clock skew offsets correctly adjust `occurred_at`.
-
-3. **Fix Blocker 3: Align `equipmentSource.ts` with Real Backend Response**:
-   - Update `fetchLiveEquipment` and response interfaces to properly handle the backend equipment list response structure (`items` or `data`, total counts).
-   - Ensure proper error surfacing so network failures are distinguishable from empty data.
+2. **Fix Steps**:
+   - Update `MarkInvoicePaymentResponse` in `frontend/src/data/invoicesSource.ts` to include `{ message: string; data: { id: number; direction: string; invoice_no: string; status: 'paid'; paid_on: string; paid_by: number; } }` (or provide backwards-compatible getters).
+   - Update `InvoicesPage.tsx` to read `res.data.invoice_no` and `res.data.paid_on`.
+   - Update `frontend/src/__tests__/invoicesSource.test.ts` to assert against the contract `{ message, data }`.
+   - Run `npm run test:frontend` and `npm run build:frontend` to verify complete resolution.
+   - Record fix in `docs/LEARNING_LOG.md`.

@@ -133,13 +133,18 @@ export interface CreateInvoiceResponse {
   total?: number;
 }
 
-export interface MarkInvoicePaymentResponse {
-  message: string;
-  invoice_id: number;
+export interface MarkInvoicePaymentData {
+  id: number;
+  direction: string;
   invoice_no: string;
   status: 'paid';
   paid_on: string;
   paid_by: number;
+}
+
+export interface MarkInvoicePaymentResponse {
+  message: string;
+  data: MarkInvoicePaymentData;
 }
 
 /**

@@ -280,11 +280,14 @@ describe('invoicesSource — Data fetching, creation & role policy', () => {
     it('sends PATCH request to record invoice payment for admin', async () => {
       const apiSpy = vi.spyOn(api, 'patch').mockResolvedValueOnce({
         message: 'Invoice marked as paid successfully',
-        invoice_id: 1,
-        invoice_no: 'INV-SUP-001',
-        status: 'paid',
-        paid_on: '2026-11-04',
-        paid_by: 1,
+        data: {
+          id: 1,
+          direction: 'received',
+          invoice_no: 'INV-SUP-001',
+          status: 'paid',
+          paid_on: '2026-11-04',
+          paid_by: 1,
+        },
       });
 
       const res = await markInvoicePayment(1, '2026-11-04', 'admin');
@@ -292,8 +295,9 @@ describe('invoicesSource — Data fetching, creation & role policy', () => {
       expect(apiSpy).toHaveBeenCalledWith('/api/invoices/1/payment', {
         paid_on: '2026-11-04',
       });
-      expect(res.status).toBe('paid');
-      expect(res.paid_on).toBe('2026-11-04');
+      expect(res.data.status).toBe('paid');
+      expect(res.data.paid_on).toBe('2026-11-04');
+      expect(res.data.invoice_no).toBe('INV-SUP-001');
     });
 
     it('rejects mark invoice payment by non-admin users without sending request', async () => {
