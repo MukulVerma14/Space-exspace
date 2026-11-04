@@ -531,3 +531,84 @@ npx vite preview
 
 ### 30-Second Explanation
 > The app now uses the same colours and fonts as the company website: ivory background, gold accents and the same heading font. Only the look changed. The behaviour, offline support and sync work exactly as before.
+
+---
+
+---
+
+## F-I1 — Materials Page: Stock List, Low-Stock Badge & Price History
+
+**Date:** 2026-11-04  
+**Status:** ✅ Complete
+
+---
+
+### What Was Built
+
+| File | Purpose |
+|---|---|
+| `frontend/src/data/materialsSource.ts` | Materials data layer: `loadMaterials` (live + IndexedDB snapshot), `fetchMaterialPriceHistory` (admin-only guard), `fetchMaterialMovements` (physical ledger), and `formatMoney` strict role-based currency formatter. |
+| `frontend/src/pages/shared/MaterialsPage.tsx` | Shared materials page: responsive stock list, 300ms debounced search, category filter, low-stock badges, quick metric cards, and slide-out item detail drawer (purchase price history + valuation for admin; physical movement quantities only for staff). |
+| `frontend/src/router/AppRouter.tsx` | Mounted `MaterialsPage` under `/admin/materials` and `/staff/materials`, replacing generic placeholders. |
+| `frontend/src/__tests__/materialsSource.test.ts` | 11 unit tests verifying strict role policy (no money rendered for staff, price history network call blocked for non-admin), live fetching, filter params, and offline snapshot fallbacks. |
+| `frontend/package.json` & `package.json` | Added `test: vitest run` and `test:frontend: npm --workspace=frontend run test`. |
+
+---
+
+### Why — Key Design Decisions
+
+#### 1. Strict Role Policy: Admin Only for Prices, Staff See Quantities Only
+**Decision:** Purchase price history (`GET /api/materials/:id/price-history`), unit prices, line totals, average cost, and valuation cards are strictly restricted to admin users. Staff users see physical quantities only.  
+**Why:** Client requirements mandate zero price visibility for yard staff. Even if an API mistakenly returns price fields, `formatMoney(amount, userRole)` strictly returns `''` unless `userRole === 'admin'`. In `MaterialsPage.tsx`, price table columns and valuation metrics are conditionally excluded from the DOM when `isAdmin === false`.  
+**Alternative rejected:** Hiding columns via CSS `display: none` — insecure because inspect element reveals financial numbers. The fields are completely omitted from rendering.
+
+#### 2. Item Detail Drawer: Price History (Admin) vs. Stock Ledger (Staff)
+**Decision:** Clicking an item opens a slide-out drawer:
+- For **Admin**: Displays Valuation Summary (Average Cost, Total Valuation, Priced Quantity, Receipts Count) and a chronological table of supplier purchase invoices (`invoice_date`, `invoice_no`, `supplier_name`, `quantity`, `unit_price`, `line_total`), plus a tab to switch to the physical ledger.
+- For **Staff**: Displays item details and physical movements only (`date`, `type`, `qty`, `moved_by`, `note`), reading from `GET /api/materials/:id/movements` with no price columns rendered.  
+**Why:** Provides operational and financial transparency for management while giving yard staff the audit trail they need without leaking commercial margins.
+
+#### 3. Low-Stock Alert Badge & One-Click Filter
+**Decision:** Items with `current_stock <= reorder_level` (or `is_low_stock = true`) receive a high-visibility amber/red `Low Stock` badge. A metric card in the top summary bar shows the exact low-stock count and toggles the list to low-stock items only.  
+**Why:** Warehouse operators need to immediately identify replenishment requirements without manually comparing current stock against reorder thresholds.
+
+#### 4. Shared Page Component Across Roles
+**Decision:** A single `MaterialsPage.tsx` powers both `/admin/materials` and `/staff/materials`.  
+**Why:** Keeps inventory layout, search, filters, and badge formatting DRY while delegating financial visibility to role-aware view switches.
+
+#### 5. Offline Snapshot Resilience
+**Decision:** `loadMaterials` caches the materials list into IndexedDB (`materials-list` per user). If offline or disconnected, it serves the cached snapshot with a timestamp badge.  
+**Why:** Consistent with the F-O2 offline architecture for equipment, allowing staff in remote yards to check specifications and reorder levels without signal.
+
+---
+
+### How to Test F-I1
+
+**1. Automated tests**
+```bash
+npm run test:frontend
+# 25/25 tests pass (including 11 in materialsSource.test.ts)
+npm run build:frontend
+# tsc && vite build succeeds with exit code 0
+```
+
+**2. Manual testing checklist**
+```bash
+npm run dev:frontend   # http://localhost:5173
+```
+
+| Role | Test Step | Expected Result |
+|---|---|---|
+| Admin | Log in as admin (`admin@space-exs.com`) → Navigate to **Materials** (`/admin/materials`) | Materials stock list loads with SKU, name, category, current stock, reorder level, and status badges. |
+| Admin | Click "Filter Low Stock" toggle | Only items with stock at or below reorder level are displayed. |
+| Admin | Click "Price History" on a material item | Side drawer opens. Shows Average Cost, Total Valuation, Priced Quantity, and table of supplier purchase invoices with unit prices in SAR. |
+| Admin | Switch drawer tab to "Physical Stock Ledger" | Table of receipts, issues, adjustments, and void reversals appears. |
+| Staff | Log in as staff (`staff@space-exs.com`) → Navigate to **Stock** (`/staff/materials`) | Materials list loads showing quantities only. Button is labelled "Stock Ledger" (no "Price History" button). |
+| Staff | Click "Stock Ledger" on a material item | Side drawer opens showing item specification and physical movements table only (`date`, `type`, `quantity`, `moved_by`, `note`). **Zero** currency symbols or price columns exist. |
+| Staff | Inspect DOM / Network | Confirm no price history API call is made and no money values appear in markup. |
+
+---
+
+### 30-Second Explanation
+
+> The Materials page gives yard operations a live view of consumable stock and reorder thresholds. Items running low automatically display an alert badge and can be isolated with a single click. For administrators, selecting an item opens full purchase price history and inventory valuation calculated from supplier invoices. For staff, commercial prices are completely locked down — staff see physical stock levels and ledger movements only, with no prices or money ever rendered on their screens.

@@ -29,6 +29,7 @@ import AdminHomePage from '../pages/admin/AdminHomePage';
 import StaffHomePage from '../pages/staff/StaffHomePage';
 import PlaceholderPage from '../pages/PlaceholderPage';
 import EquipmentListPage from '../pages/shared/EquipmentListPage';
+import MaterialsPage from '../pages/shared/MaterialsPage';
 
 // ─── Root redirect ────────────────────────────────────────────────────────────
 
@@ -64,7 +65,7 @@ const router = createBrowserRouter([
           { path: '/admin',             element: <AdminHomePage /> },
           { path: '/admin/equipment',   element: <EquipmentListPage /> },
           { path: '/admin/rentals',     element: <PlaceholderPage title="Rentals" /> },
-          { path: '/admin/materials',   element: <PlaceholderPage title="Materials" /> },
+          { path: '/admin/materials',   element: <MaterialsPage /> },
           { path: '/admin/invoices',    element: <PlaceholderPage title="Invoices" /> },
         ],
       },
@@ -81,7 +82,7 @@ const router = createBrowserRouter([
           { path: '/staff',             element: <StaffHomePage /> },
           { path: '/staff/equipment',   element: <EquipmentListPage /> },
           { path: '/staff/rentals',     element: <PlaceholderPage title="Rentals" /> },
-          { path: '/staff/materials',   element: <PlaceholderPage title="Stock" /> },
+          { path: '/staff/materials',   element: <MaterialsPage /> },
         ],
       },
     ],
