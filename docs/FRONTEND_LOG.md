@@ -687,3 +687,86 @@ npm run dev:frontend   # http://localhost:5173
 ### 30-Second Explanation
 
 > The Invoices page provides administrators with a centralised commercial ledger for supplier purchases and customer rental billings. Direction tabs cleanly separate incoming vendor receipts from outgoing customer invoices. Selecting an invoice opens a detailed drawer with line-item breakdowns, tax calculations, and payment or void audit trails. Status badges highlight unpaid invoices, while file references are rendered safely as plain text strings.
+
+
+---
+
+## F-I3 — "New Supplier Invoice" Form: Dynamic Lines, Server Authority & Error Clarity
+
+**Date:** 2026-11-04  
+**Status:** ✅ Complete
+
+---
+
+### What Was Built
+
+| File | Purpose |
+|---|---|
+| `frontend/src/components/NewSupplierInvoiceModal.tsx` | Modal form for recording received supplier invoices: supplier party selection (presets or custom ID), invoice date, due date, optional plain-text file reference, inventory receipt toggle, dynamic line items with 300ms debounced material search, computed totals preview, and clear server error formatting. |
+| `frontend/src/data/invoicesSource.ts` | Added `computeInvoiceTotals` helper (accurate half-up decimal math) and `createSupplierInvoice` API caller (guarded to Admin role only). |
+| `frontend/src/pages/admin/InvoicesPage.tsx` | Added "+ New Supplier Invoice" trigger button, success alert banner, and auto-refresh + drawer navigation upon successful invoice creation. |
+| `frontend/src/__tests__/invoicesSource.test.ts` | Unit tests verifying `computeInvoiceTotals` accuracy without floating point drift, `createSupplierInvoice` payload submission, and non-admin rejection without network requests. |
+
+---
+
+### Why — Key Design Decisions
+
+#### 1. Dynamic Lines with 300ms Debounced Material Catalog Search
+**Decision:** Users can add and remove line items dynamically (minimum 1 line). For each line, typing in the item search field is debounced by 300ms before filtering the warehouse material catalog. Selecting an item automatically sets `item_id`, fills `description`, and assigns `unit_id` and `unit_code`.  
+**Why:** Prevents rapid keystroke filtering re-renders on large catalogs and ensures lines are accurately bound to valid database items and unit constraints.
+
+#### 2. Server Authority on Financial Reconciliation
+**Decision:** While the UI previews subtotal, 15% VAT, and grand total in real-time, the server remains the single authority on commercial reconciliation. The computed numbers are submitted in the payload, and any server-side validation or precision error is returned and displayed explicitly.  
+**Why:** The frontend should never pretend to be the single source of truth on tax or accounting numbers. The server validates line items and decimal precision in a single database transaction.
+
+#### 3. Clear Server Error Formatting
+**Decision:** All API errors from `POST /api/invoices/supplier` are caught and formatted into a prominent red alert banner at the top of the form:
+- Duplicate (409) returns: *"Duplicate Invoice (409): Invoice '<number>' already exists for this supplier."*
+- Totals mismatch (400) surfaces the exact discrepancy message from the server.
+- Validation failures highlight missing line items or invalid party IDs.  
+**Why:** Users get immediate, actionable feedback without having to inspect DevTools or decipher HTTP error codes.
+
+#### 4. Disable Submit While in Flight
+**Decision:** Submitting sets `submitting = true`, which disables the submit button, displays an active spinner, and disables form fields until the server responds.  
+**Why:** Prevents double submissions and duplicate database transactions on slow network links.
+
+#### 5. Plain Text File References & Optional Stock Intake
+**Decision:** The `file_url` field accepts a plain text reference string (max 500 characters, no executable URL schemes). The `record_stock_receipt` checkbox (defaults to checked) allows warehouse admins to choose whether received items immediately record positive inventory receipts in the stock ledger.  
+**Why:** Protects against XSS/phishing vectors and provides operational flexibility when recording invoices retroactively.
+
+---
+
+### How to Test F-I3
+
+**1. Automated tests**
+```bash
+npm run test:frontend
+# 34/34 tests pass (including 9 in invoicesSource.test.ts)
+npm run build:frontend
+# tsc && vite build succeeds with exit code 0
+```
+
+**2. Manual testing checklist**
+```bash
+npm run dev:frontend   # http://localhost:5173
+```
+
+| Role | Test Step | Expected Result |
+|---|---|---|
+| Admin | Log in as admin (`admin@space-exs.com`) → Invoices page (`/admin/invoices`) | "+ New Supplier Invoice" button is visible in the page header. |
+| Admin | Click "+ New Supplier Invoice" | Modal opens with Supplier Party, Invoice #, Dates, File Ref, and one empty line. |
+| Admin | Type "Hydraulic" in line 1 item search | After 300ms debounce, suggestion dropdown shows matched items (e.g. `[MAT-001] Hydraulic Oil ISO 46`). |
+| Admin | Click an item from dropdown | Item SKU, name, unit (L), and description are populated automatically. |
+| Admin | Set Qty: `5`, Unit Price: `45.50` | Line total shows `227.50 SAR`. Computed Subtotal shows `227.50 SAR`, VAT (15%) shows `34.13 SAR`, Total shows `261.63 SAR`. |
+| Admin | Click "+ Add Line" | Adds Line #2. Fill item and values; preview totals update dynamically. |
+| Admin | Click "Remove" on Line #2 | Removes Line #2; totals adjust back. Remove button is disabled when only 1 line remains. |
+| Admin | Click "Record Supplier Invoice" | Submit button changes to "Recording Invoice..." with spinner and inputs are disabled. |
+| Admin | On success | Modal closes, green success banner appears on Invoices page, list re-fetches, and new invoice opens in the detail drawer. |
+| Admin | Enter duplicate invoice # for same supplier | Modal displays: *"Duplicate Invoice (409): Invoice '...' already exists for this supplier."* Submit button re-enables. |
+| Staff | Log in as staff | Invoices route is inaccessible (redirects to `/staff`). No invoice buttons exist. |
+
+---
+
+### 30-Second Explanation
+
+> Administrators can now record received supplier invoices through a responsive modal with dynamic line items. Typing in the item search field debounces across the material catalog and auto-fills descriptions and unit specifications. Subtotal, 15% VAT, and total amounts are previewed in real-time while submitting delegates final reconciliation to the server. Double-submissions are prevented while requests are in flight, and server rejections (such as duplicate invoice numbers or precision mismatches) are displayed in a clear error alert.

@@ -78,6 +78,59 @@ export interface InvoicesQueryParams {
   limit?: number;
 }
 
+export interface CreateSupplierInvoiceLinePayload {
+  item_id: number;
+  description: string;
+  quantity: number;
+  unit_id: number;
+  unit_price: number;
+}
+
+export interface CreateSupplierInvoicePayload {
+  party_id: number;
+  invoice_no: string;
+  invoice_date: string;
+  due_date: string;
+  subtotal: number;
+  vat_amount: number;
+  total: number;
+  notes?: string | null;
+  file_url?: string | null;
+  record_stock_receipt: boolean;
+  lines: CreateSupplierInvoiceLinePayload[];
+}
+
+export interface CreateInvoiceResponse {
+  message: string;
+  invoice_id: number;
+  invoice_no: string;
+  lines_recorded: number;
+}
+
+/**
+ * Accurately computes invoice totals (subtotal, 15% VAT, total) with 2-decimal half-up rounding.
+ */
+export function computeInvoiceTotals(
+  lines: Array<{ quantity: number | string; unit_price: number | string }>
+): { subtotal: number; vat_amount: number; total: number } {
+  let subtotalCents = 0;
+  for (const line of lines) {
+    const q = parseFloat(String(line.quantity)) || 0;
+    const p = parseFloat(String(line.unit_price)) || 0;
+    const lineTotal = Math.round(q * p * 100);
+    subtotalCents += lineTotal;
+  }
+  const subtotal = subtotalCents / 100;
+  const vatAmount = Math.round(subtotal * 15) / 100;
+  const total = Math.round((subtotal + vatAmount) * 100) / 100;
+
+  return {
+    subtotal,
+    vat_amount: vatAmount,
+    total,
+  };
+}
+
 /**
  * Fetches paginated invoices matching filters.
  * Admin only.
@@ -125,6 +178,21 @@ export async function fetchInvoiceById(
 
   const res = await api.get<{ data: InvoiceDetail }>(`/api/invoices/${id}`);
   return res.data;
+}
+
+/**
+ * Creates a received supplier invoice with line items and optional stock movement receipts.
+ * Admin only.
+ */
+export async function createSupplierInvoice(
+  payload: CreateSupplierInvoicePayload,
+  userRole?: string
+): Promise<CreateInvoiceResponse> {
+  if (userRole && userRole !== 'admin') {
+    throw new Error('Unauthorized: Only administrators can record supplier invoices.');
+  }
+
+  return api.post<CreateInvoiceResponse>('/api/invoices/supplier', payload);
 }
 
 export { formatMoney };

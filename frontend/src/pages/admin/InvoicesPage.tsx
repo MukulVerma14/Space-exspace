@@ -1,14 +1,17 @@
 /**
  * InvoicesPage — Admin invoice management view.
  *
- * Requirements (F-I2):
+ * Requirements (F-I2 & F-I3):
  * - Invoices page (admin): list with a received/issued tab.
  * - Detail drawer with lines.
  * - Status badges (unpaid, paid, void).
+ * - "New supplier invoice" form modal with dynamic lines (item, quantity, unit, unit price).
+ * - Show computed totals with server as final authority.
+ * - Show server errors clearly. Debounce item search; disable submit while in flight.
  * - Never render money for staff, and show file references as plain text.
  */
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useDebounce } from '../../hooks/useDebounce';
 import {
@@ -20,6 +23,7 @@ import {
   fetchInvoiceById,
   formatMoney,
 } from '../../data/invoicesSource';
+import NewSupplierInvoiceModal from '../../components/NewSupplierInvoiceModal';
 
 export default function InvoicesPage() {
   const { user } = useAuth();
@@ -29,13 +33,15 @@ export default function InvoicesPage() {
   const [invoices, setInvoices] = useState<InvoiceListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [successNotice, setSuccessNotice] = useState<string | null>(null);
 
   // Filters
   const [directionTab, setDirectionTab] = useState<InvoiceDirection | 'all'>('all');
   const [statusFilter, setStatusFilter] = useState<InvoiceStatus | 'all'>('all');
   const [search, setSearch] = useState('');
 
-  // Detail drawer state
+  // Modals & Drawers state
+  const [isSupplierModalOpen, setIsSupplierModalOpen] = useState(false);
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<number | null>(null);
   const [drawerDetail, setDrawerDetail] = useState<InvoiceDetail | null>(null);
   const [drawerLoading, setDrawerLoading] = useState(false);
@@ -43,10 +49,9 @@ export default function InvoicesPage() {
 
   const debouncedSearch = useDebounce(search, 300);
 
-  // Fetch invoices on filter/tab changes
-  useEffect(() => {
+  // Fetch invoices helper
+  const loadInvoices = useCallback(() => {
     if (!isAdmin) return;
-    let cancelled = false;
     setLoading(true);
     setError(null);
 
@@ -59,20 +64,18 @@ export default function InvoicesPage() {
       user?.role
     )
       .then((res) => {
-        if (cancelled) return;
         setInvoices(res.data ?? []);
         setLoading(false);
       })
       .catch((err) => {
-        if (cancelled) return;
         setError(err instanceof Error ? err.message : String(err));
         setLoading(false);
       });
-
-    return () => {
-      cancelled = true;
-    };
   }, [isAdmin, directionTab, statusFilter, user?.role]);
+
+  useEffect(() => {
+    loadInvoices();
+  }, [loadInvoices]);
 
   // Load single invoice details for drawer
   function handleOpenDetail(id: number) {
@@ -95,6 +98,14 @@ export default function InvoicesPage() {
     setSelectedInvoiceId(null);
     setDrawerDetail(null);
     setDrawerError(null);
+  }
+
+  // Handle supplier invoice creation success
+  function handleSupplierInvoiceSuccess(newId: number, invNo: string) {
+    setIsSupplierModalOpen(false);
+    setSuccessNotice(`Supplier invoice '${invNo}' recorded successfully. Stock movements and price history updated.`);
+    loadInvoices();
+    handleOpenDetail(newId);
   }
 
   // Client-side text search over fetched page
@@ -128,13 +139,50 @@ export default function InvoicesPage() {
     <div className="animate-fade-up">
       {/* ── Page Header ── */}
       <div style={{ marginBottom: 'var(--space-6)' }}>
-        <h1 style={{ fontSize: 'var(--text-3xl)', fontWeight: 700, margin: 0 }}>
-          Invoices
-        </h1>
-        <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)', marginTop: 'var(--space-1)' }}>
-          Commercial accounting: supplier purchase receipts and customer rental billing ledger
-        </p>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 'var(--space-3)' }}>
+          <div>
+            <h1 style={{ fontSize: 'var(--text-3xl)', fontWeight: 700, margin: 0 }}>
+              Invoices
+            </h1>
+            <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)', marginTop: 'var(--space-1)' }}>
+              Commercial accounting: supplier purchase receipts and customer rental billing ledger
+            </p>
+          </div>
+
+          {/* Action button */}
+          <button
+            type="button"
+            id="open-new-supplier-invoice-btn"
+            className="btn btn-primary"
+            onClick={() => setIsSupplierModalOpen(true)}
+          >
+            + New Supplier Invoice
+          </button>
+        </div>
       </div>
+
+      {/* ── Success Banner ── */}
+      {successNotice && (
+        <div
+          className="alert alert-info"
+          style={{
+            marginBottom: 'var(--space-6)',
+            background: 'var(--color-success-dim)',
+            color: 'var(--color-success)',
+            borderColor: 'var(--color-success)',
+          }}
+        >
+          <span>{successNotice}</span>
+          <button
+            type="button"
+            onClick={() => setSuccessNotice(null)}
+            className="btn btn-ghost"
+            style={{ padding: '0 var(--space-2)', marginLeft: 'auto', border: 'none', color: 'inherit' }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* ── Summary Counters ── */}
       <div
@@ -680,6 +728,13 @@ export default function InvoicesPage() {
           </div>
         </div>
       )}
+
+      {/* ── New Supplier Invoice Modal ── */}
+      <NewSupplierInvoiceModal
+        isOpen={isSupplierModalOpen}
+        onClose={() => setIsSupplierModalOpen(false)}
+        onSuccess={handleSupplierInvoiceSuccess}
+      />
     </div>
   );
 }

@@ -2,12 +2,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   fetchInvoices,
   fetchInvoiceById,
+  createSupplierInvoice,
+  computeInvoiceTotals,
   InvoiceListItem,
   InvoiceDetail,
+  CreateSupplierInvoicePayload,
 } from '../data/invoicesSource';
 import { api } from '../api/client';
 
-describe('invoicesSource — Data fetching & role policy', () => {
+describe('invoicesSource — Data fetching, creation & role policy', () => {
   const dummyInvoices: InvoiceListItem[] = [
     {
       id: 1,
@@ -61,6 +64,31 @@ describe('invoicesSource — Data fetching & role policy', () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+  });
+
+  describe('computeInvoiceTotals', () => {
+    it('accurately computes subtotal, 15% VAT, and total without float drift', () => {
+      const lines = [
+        { quantity: 5, unit_price: 45.5 }, // 227.50
+        { quantity: 2, unit_price: 100 },  // 200.00
+      ];
+      const res = computeInvoiceTotals(lines);
+
+      expect(res.subtotal).toBe(427.5);
+      expect(res.vat_amount).toBe(64.13); // 427.50 * 0.15 = 64.125 -> 64.13
+      expect(res.total).toBe(491.63);      // 427.50 + 64.13 = 491.63
+    });
+
+    it('handles decimal quantities and 4-decimal unit prices cleanly', () => {
+      const lines = [
+        { quantity: '10.5', unit_price: '4.5555' }, // 47.83275 -> 47.83
+      ];
+      const res = computeInvoiceTotals(lines);
+
+      expect(res.subtotal).toBe(47.83);
+      expect(res.vat_amount).toBe(7.17); // 47.83 * 0.15 = 7.1745 -> 7.17
+      expect(res.total).toBe(55.0);
+    });
   });
 
   describe('fetchInvoices', () => {
@@ -143,6 +171,54 @@ describe('invoicesSource — Data fetching & role policy', () => {
 
       await expect(fetchInvoiceById(1, 'staff')).rejects.toThrow(
         /Unauthorized: Invoices are restricted to administrators/
+      );
+      expect(apiSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('createSupplierInvoice', () => {
+    const samplePayload: CreateSupplierInvoicePayload = {
+      party_id: 2,
+      invoice_no: 'INV-SUP-2026-999',
+      invoice_date: '2026-11-04',
+      due_date: '2026-12-04',
+      subtotal: 455.0,
+      vat_amount: 68.25,
+      total: 523.25,
+      notes: 'Stock replenishment for yard',
+      file_url: 'invoices/scan-999.pdf',
+      record_stock_receipt: true,
+      lines: [
+        {
+          item_id: 1,
+          description: 'Hydraulic Oil ISO 46',
+          quantity: 10,
+          unit_id: 1,
+          unit_price: 45.5,
+        },
+      ],
+    };
+
+    it('posts supplier invoice payload for admin', async () => {
+      const apiSpy = vi.spyOn(api, 'post').mockResolvedValueOnce({
+        message: 'Supplier invoice recorded successfully.',
+        invoice_id: 42,
+        invoice_no: 'INV-SUP-2026-999',
+        lines_recorded: 1,
+      });
+
+      const res = await createSupplierInvoice(samplePayload, 'admin');
+
+      expect(apiSpy).toHaveBeenCalledWith('/api/invoices/supplier', samplePayload);
+      expect(res.invoice_id).toBe(42);
+      expect(res.invoice_no).toBe('INV-SUP-2026-999');
+    });
+
+    it('rejects creation attempt by non-admin users without sending request', async () => {
+      const apiSpy = vi.spyOn(api, 'post');
+
+      await expect(createSupplierInvoice(samplePayload, 'staff')).rejects.toThrow(
+        /Unauthorized: Only administrators can record supplier invoices/
       );
       expect(apiSpy).not.toHaveBeenCalled();
     });
