@@ -96,15 +96,99 @@ async function request<T>(
 
   if (!res.ok) {
     // Extract the server-provided message if present
-    const serverMessage =
+    let serverMessage =
       typeof data === 'object' && data !== null && 'error' in data
         ? String((data as Record<string, unknown>).error)
         : `HTTP ${res.status}`;
+
+    // Provide a clear explanatory message for 403 Forbidden errors
+    if (res.status === 403) {
+      serverMessage = `Access Denied (403 Forbidden): ${serverMessage || 'Administrator privileges are required for this action.'}`;
+    }
 
     throw new ApiRequestError(res.status, serverMessage, data);
   }
 
   return data as T;
+}
+
+// ─── Snapshot & Conditional HTTP ─────────────────────────────────────────────
+
+export interface SnapshotResponse<T> {
+  notModified: boolean;
+  etag?: string | null;
+  data?: T;
+}
+
+/**
+ * Fetches cacheable snapshot data using conditional HTTP (If-None-Match header).
+ * Returns { notModified: true } on HTTP 304, or the fresh data with updated etag on HTTP 200.
+ */
+export async function fetchSnapshotWithEtag<T>(
+  path: string,
+  ifNoneMatch?: string | null
+): Promise<SnapshotResponse<T>> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  const token = loadToken();
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  if (ifNoneMatch) {
+    headers['If-None-Match'] = ifNoneMatch;
+  }
+
+  const res = await fetch(path, {
+    method: 'GET',
+    headers,
+  });
+
+  const etag = res.headers.get('etag');
+  const serverTime = res.headers.get('date');
+  if (serverTime) {
+    calibrateClockFromServerTime(serverTime);
+  }
+
+  if (res.status === 304) {
+    return { notModified: true, etag: etag || ifNoneMatch || null };
+  }
+
+  let data: unknown;
+  const contentType = res.headers.get('content-type') ?? '';
+  if (contentType.includes('application/json')) {
+    data = await res.json();
+  } else {
+    data = await res.text();
+  }
+
+  if (typeof data === 'object' && data !== null && 'server_time' in data) {
+    calibrateClockFromServerTime(String((data as Record<string, unknown>).server_time));
+  }
+
+  if (!res.ok) {
+    let serverMessage =
+      typeof data === 'object' && data !== null && 'error' in data
+        ? String((data as Record<string, unknown>).error)
+        : `HTTP ${res.status}`;
+    if (res.status === 403) {
+      serverMessage = `Access Denied (403 Forbidden): ${serverMessage || 'Administrator privileges are required for this action.'}`;
+    }
+    throw new ApiRequestError(res.status, serverMessage, data);
+  }
+
+  const resolvedEtag =
+    etag ||
+    (typeof data === 'object' && data !== null && 'etag' in data
+      ? String((data as Record<string, unknown>).etag)
+      : null);
+
+  return {
+    notModified: false,
+    etag: resolvedEtag,
+    data: data as T,
+  };
 }
 
 // ─── Convenience methods ──────────────────────────────────────────────────────

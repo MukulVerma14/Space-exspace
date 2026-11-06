@@ -1,10 +1,11 @@
 /**
  * NewCustomerInvoiceModal — Form modal for recording issued customer billing invoices.
  *
- * Requirements (F-I4):
+ * Requirements (F-I4, F-S4):
  * - Store-only customer invoice workflow (no generation, no ZATCA XML).
  * - Dynamic lines with debounced item search or custom service descriptions.
- * - Customer party selector (with seeded customer presets and custom party ID).
+ * - Searchable customer party picker (GET /api/parties?role=customer).
+ * - Editable VAT percentage with 15% default and arbitrary-precision preview totals via decimal.js.
  * - Optional associated rental contract ID (rental_id).
  * - Real-time computed totals with server as final authority.
  * - Clear server error formatting (400 validation, foreign rental, 409 duplicate).
@@ -23,6 +24,7 @@ import {
   CreateCustomerInvoicePayload,
 } from '../data/invoicesSource';
 import { ApiRequestError } from '../api/client';
+import SearchablePartyPicker from './SearchablePartyPicker';
 
 interface NewCustomerInvoiceModalProps {
   isOpen: boolean;
@@ -41,12 +43,6 @@ interface CustomerFormLine {
   unit_code: string;
   unit_price: string;
 }
-
-const SEEDED_CUSTOMERS = [
-  { id: 4, name: 'Apex Infrastructure Partners' },
-  { id: 5, name: 'Gulf Petrochemical Services Ltd' },
-  { id: 6, name: 'Al-Mansoor Contracting Est.' },
-];
 
 function getTodayString(): string {
   return new Date().toISOString().split('T')[0];
@@ -84,9 +80,8 @@ export default function NewCustomerInvoiceModal({
   const [catalogLoading, setCatalogLoading] = useState(false);
 
   // Form Header State
-  const [partyId, setPartyId] = useState<number>(4);
-  const [customPartyId, setCustomPartyId] = useState<string>('');
-  const [isCustomParty, setIsCustomParty] = useState(false);
+  const [partyId, setPartyId] = useState<number | null>(null);
+  const [vatRate, setVatRate] = useState<string>('15.00');
   const [invoiceNo, setInvoiceNo] = useState('');
   const [rentalId, setRentalId] = useState<string>('');
   const [invoiceDate, setInvoiceDate] = useState(getTodayString());
@@ -116,9 +111,8 @@ export default function NewCustomerInvoiceModal({
   // Reset form when opened
   useEffect(() => {
     if (isOpen) {
-      setPartyId(4);
-      setCustomPartyId('');
-      setIsCustomParty(false);
+      setPartyId(null);
+      setVatRate('15.00');
       setInvoiceNo('');
       setRentalId('');
       setInvoiceDate(getTodayString());
@@ -131,19 +125,20 @@ export default function NewCustomerInvoiceModal({
     }
   }, [isOpen]);
 
-  // Client-side computed totals (server remains final authority)
+  // Client-side computed totals with decimal.js (server remains final authority)
   const computedTotals = useMemo(() => {
     return computeInvoiceTotals(
-      lines.map((l) => ({ quantity: l.quantity, unit_price: l.unit_price }))
+      lines.map((l) => ({ quantity: l.quantity, unit_price: l.unit_price })),
+      vatRate
     );
-  }, [lines]);
+  }, [lines, vatRate]);
 
-  // Line modification helpers
+  // Line helpers
   function updateLine(index: number, updates: Partial<CustomerFormLine>) {
     setLines((prev) => {
-      const copy = [...prev];
-      copy[index] = { ...copy[index], ...updates };
-      return copy;
+      const next = [...prev];
+      next[index] = { ...next[index], ...updates };
+      return next;
     });
   }
 
@@ -161,10 +156,8 @@ export default function NewCustomerInvoiceModal({
     e.preventDefault();
     setServerError(null);
 
-    const finalPartyId = isCustomParty ? parseInt(customPartyId, 10) : partyId;
-
-    if (!finalPartyId || isNaN(finalPartyId) || finalPartyId <= 0) {
-      setServerError('Please select or specify a valid customer party ID.');
+    if (!partyId || partyId <= 0) {
+      setServerError('Please select a valid customer party from the picker.');
       return;
     }
 
@@ -200,7 +193,7 @@ export default function NewCustomerInvoiceModal({
 
     // Prepare payload
     const payload: CreateCustomerInvoicePayload = {
-      party_id: finalPartyId,
+      party_id: partyId,
       invoice_no: invoiceNo.trim(),
       rental_id: parsedRentalId,
       invoice_date: invoiceDate,
@@ -271,7 +264,7 @@ export default function NewCustomerInvoiceModal({
       <div
         style={{
           width: '100%',
-          maxWidth: 880,
+          maxWidth: 900,
           maxHeight: '92vh',
           background: 'var(--color-bg)',
           borderRadius: 'var(--radius-lg)',
@@ -299,7 +292,7 @@ export default function NewCustomerInvoiceModal({
               📤 Record Issued Customer Invoice
             </h2>
             <p style={{ margin: 0, fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)' }}>
-              Commercial billing record · Equipment rental and service invoice (Store-only workflow)
+              Commercial Billing · Store-Only (No stock movements · Zero XML overhead)
             </p>
           </div>
 
@@ -319,8 +312,8 @@ export default function NewCustomerInvoiceModal({
         <form
           onSubmit={handleSubmit}
           style={{
-            overflowY: 'auto',
             padding: 'var(--space-6)',
+            overflowY: 'auto',
             display: 'flex',
             flexDirection: 'column',
             gap: 'var(--space-5)',
@@ -347,53 +340,19 @@ export default function NewCustomerInvoiceModal({
                 gap: 'var(--space-4)',
               }}
             >
-              {/* Customer Party */}
+              {/* Searchable Customer Party */}
               <div className="form-field">
                 <label className="form-label" htmlFor="customer-party-select">
                   Customer Party *
                 </label>
-                {!isCustomParty ? (
-                  <select
-                    id="customer-party-select"
-                    className="select"
-                    value={partyId}
-                    disabled={submitting}
-                    onChange={(e) => {
-                      if (e.target.value === 'custom') {
-                        setIsCustomParty(true);
-                      } else {
-                        setPartyId(parseInt(e.target.value, 10));
-                      }
-                    }}
-                  >
-                    {SEEDED_CUSTOMERS.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name} (ID: {c.id})
-                      </option>
-                    ))}
-                    <option value="custom">+ Other Customer ID...</option>
-                  </select>
-                ) : (
-                  <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-                    <input
-                      type="number"
-                      className="input"
-                      placeholder="Enter Customer ID"
-                      value={customPartyId}
-                      disabled={submitting}
-                      onChange={(e) => setCustomPartyId(e.target.value)}
-                      required
-                    />
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      onClick={() => setIsCustomParty(false)}
-                      disabled={submitting}
-                    >
-                      Presets
-                    </button>
-                  </div>
-                )}
+                <SearchablePartyPicker
+                  id="customer-party-select"
+                  role="customer"
+                  value={partyId}
+                  onChange={(p) => setPartyId(p?.id ?? null)}
+                  required
+                  disabled={submitting}
+                />
               </div>
 
               {/* Invoice Number */}
@@ -413,7 +372,7 @@ export default function NewCustomerInvoiceModal({
                 />
               </div>
 
-              {/* Optional Rental Contract ID */}
+              {/* Linked Rental Contract (Optional) */}
               <div className="form-field">
                 <label className="form-label" htmlFor="customer-rental-id">
                   Rental Contract ID (Optional)
@@ -422,13 +381,13 @@ export default function NewCustomerInvoiceModal({
                   id="customer-rental-id"
                   type="number"
                   className="input"
-                  placeholder="e.g. 1"
+                  placeholder="e.g. 10 (Leave blank if service/general)"
                   value={rentalId}
                   disabled={submitting}
                   onChange={(e) => setRentalId(e.target.value)}
                 />
-                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-subtle)' }}>
-                  If specified, must belong to this customer party.
+                <span style={{ fontSize: '0.7rem', color: 'var(--color-text-subtle)' }}>
+                  Must belong to the selected customer party.
                 </span>
               </div>
 
@@ -459,41 +418,49 @@ export default function NewCustomerInvoiceModal({
                   className="input"
                   value={dueDate}
                   disabled={submitting}
+                  min={invoiceDate}
                   onChange={(e) => setDueDate(e.target.value)}
                   required
                 />
               </div>
+            </div>
 
-              {/* File Reference String */}
-              <div className="form-field" style={{ gridColumn: 'span 2' }}>
+            {/* Optional Notes and Plain-Text File URL */}
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+                gap: 'var(--space-4)',
+                marginTop: 'var(--space-4)',
+              }}
+            >
+              <div className="form-field">
                 <label className="form-label" htmlFor="customer-file-url">
-                  File Reference String (Plain Text, max 500 chars)
+                  Signed Customer Invoice Reference (Plain Text)
                 </label>
                 <input
                   id="customer-file-url"
                   type="text"
                   className="input"
-                  placeholder="e.g. S3://billing/2026/cust-inv-001.pdf or scan-ref-001.pdf"
+                  placeholder="e.g. Physical Folder 2026/AR-04, or s3://contracts/aramco-cust-001.pdf"
                   value={fileUrl}
-                  maxLength={500}
                   disabled={submitting}
                   onChange={(e) => setFileUrl(e.target.value)}
                 />
-                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-subtle)' }}>
-                  Plain document reference only. Executable URL schemes are rejected.
+                <span style={{ fontSize: '0.7rem', color: 'var(--color-text-subtle)' }}>
+                  Plain text reference only; never rendered as executable links.
                 </span>
               </div>
 
-              {/* Notes */}
-              <div className="form-field" style={{ gridColumn: 'span 2' }}>
+              <div className="form-field">
                 <label className="form-label" htmlFor="customer-notes">
-                  Invoice Notes (Optional)
+                  Billing Notes / Payment Terms
                 </label>
                 <input
                   id="customer-notes"
                   type="text"
                   className="input"
-                  placeholder="Terms, payment instructions, or site dispatch notes"
+                  placeholder="e.g. Net 30, Milestone payment 1"
                   value={notes}
                   disabled={submitting}
                   onChange={(e) => setNotes(e.target.value)}
@@ -502,19 +469,32 @@ export default function NewCustomerInvoiceModal({
             </div>
           </div>
 
-          {/* Dynamic Lines Card */}
+          {/* Dynamic Line Items Section */}
           <div className="card" style={{ padding: 'var(--space-5)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-3)' }}>
-              <h3 style={{ fontSize: 'var(--text-base)', margin: 0, color: 'var(--color-info)' }}>
-                2. Dynamic Billing Lines ({lines.length})
-              </h3>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginBottom: 'var(--space-4)',
+              }}
+            >
+              <div>
+                <h3 style={{ fontSize: 'var(--text-base)', margin: 0, color: 'var(--color-info)' }}>
+                  2. Billable Line Items ({lines.length})
+                </h3>
+                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)' }}>
+                  Enter service charges, equipment rental terms, or consumable materials
+                </span>
+              </div>
+
               <button
                 type="button"
-                id="add-customer-invoice-line-btn"
-                className="btn btn-ghost"
+                id="add-customer-line-btn"
+                className="btn btn-outline"
                 onClick={addLine}
                 disabled={submitting}
-                style={{ fontSize: 'var(--text-xs)', padding: 'var(--space-1) var(--space-3)' }}
+                style={{ fontSize: 'var(--text-xs)' }}
               >
                 + Add Line
               </button>
@@ -537,7 +517,7 @@ export default function NewCustomerInvoiceModal({
             </div>
           </div>
 
-          {/* Computed Totals Card */}
+          {/* Computed Totals Card with Editable VAT (decimal.js) */}
           <div
             className="card"
             style={{
@@ -552,6 +532,7 @@ export default function NewCustomerInvoiceModal({
                 gridTemplateColumns: 'repeat(3, 1fr)',
                 gap: 'var(--space-4)',
                 textAlign: 'center',
+                alignItems: 'center',
               }}
             >
               <div>
@@ -562,8 +543,24 @@ export default function NewCustomerInvoiceModal({
               </div>
 
               <div>
-                <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)' }}>Computed VAT (15%)</div>
-                <div style={{ fontSize: 'var(--text-lg)', fontWeight: 700, fontFamily: 'var(--font-mono)', color: 'var(--color-warning)' }}>
+                <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)', marginBottom: 2 }}>
+                  VAT Rate (%)
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max="100"
+                    className="input"
+                    value={vatRate}
+                    disabled={submitting}
+                    onChange={(e) => setVatRate(e.target.value)}
+                    style={{ width: 75, textAlign: 'right', padding: '2px 6px', fontSize: 'var(--text-sm)' }}
+                  />
+                  <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)' }}>%</span>
+                </div>
+                <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-warning)', marginTop: 2, fontFamily: 'var(--font-mono)' }}>
                   {formatMoney(computedTotals.vat_amount, user?.role)}
                 </div>
               </div>
@@ -577,7 +574,7 @@ export default function NewCustomerInvoiceModal({
             </div>
 
             <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-subtle)', textAlign: 'center', marginTop: 'var(--space-3)' }}>
-              * Totals are previewed client-side; the server is the single authoritative calculator and enforces exact decimal reconciliation. Issued customer invoices do NOT create inventory movements.
+              * Totals are previewed client-side using decimal.js (half-up rounding); the server is the single authoritative calculator and enforces exact decimal reconciliation. Issued customer invoices do NOT create inventory movements.
             </div>
           </div>
 
@@ -601,7 +598,7 @@ export default function NewCustomerInvoiceModal({
               {submitting ? (
                 <>
                   <span className="spinner" style={{ width: 14, height: 14 }} />
-                  <span>Recording Invoice...</span>
+                  <span>Recording Customer Invoice...</span>
                 </>
               ) : (
                 'Record Customer Invoice'
@@ -614,7 +611,7 @@ export default function NewCustomerInvoiceModal({
   );
 }
 
-// ─── Sub-Component: Customer Line Item Row ─────────────────────────────────────
+// ─── Sub-Component: Customer Line Item Row ────────────────────────────────────
 
 interface CustomerLineRowProps {
   index: number;
@@ -709,13 +706,13 @@ function CustomerLineRow({
           alignItems: 'flex-start',
         }}
       >
-        {/* Optional Item Picker from Catalog (or custom service) */}
+        {/* Optional Material Item Association */}
         <div style={{ position: 'relative' }}>
-          <label style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)' }}>Material SKU (Optional)</label>
+          <label style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)' }}>Material Item (Optional)</label>
           <input
             type="text"
             className="input"
-            placeholder={line.item_sku ? `[${line.item_sku}] ${line.item_name}` : 'Search SKU or leave empty'}
+            placeholder={line.item_sku ? `[${line.item_sku}] ${line.item_name}` : 'Search item or leave blank'}
             value={itemSearch}
             disabled={disabled}
             onChange={(e) => {
@@ -726,16 +723,10 @@ function CustomerLineRow({
             style={{ fontSize: 'var(--text-xs)', padding: 'var(--space-2)' }}
           />
 
+          {/* Selected Item Pill */}
           {line.item_id && !itemSearch && (
-            <div style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', marginTop: 2, display: 'flex', justifyContent: 'space-between' }}>
-              <span>Linked: <strong>[{line.item_sku}]</strong></span>
-              <button
-                type="button"
-                onClick={() => onUpdate({ item_id: null, item_sku: '', item_name: '' })}
-                style={{ background: 'none', border: 'none', color: 'var(--color-danger)', cursor: 'pointer', fontSize: '0.65rem' }}
-              >
-                Clear
-              </button>
+            <div style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', marginTop: 2 }}>
+              Linked: <strong style={{ color: 'var(--color-info)' }}>[{line.item_sku}]</strong> {line.item_name}
             </div>
           )}
 
@@ -774,14 +765,14 @@ function CustomerLineRow({
                       fontSize: 'var(--text-xs)',
                       cursor: 'pointer',
                       borderBottom: '1px solid var(--color-border-subtle)',
-                      background: it.id === line.item_id ? 'var(--color-primary-glow)' : 'transparent',
+                      background: it.id === line.item_id ? 'var(--color-info-glow)' : 'transparent',
                     }}
                     onMouseEnter={(e) => {
                       (e.currentTarget as HTMLElement).style.background = 'var(--color-surface-2)';
                     }}
                     onMouseLeave={(e) => {
                       (e.currentTarget as HTMLElement).style.background =
-                        it.id === line.item_id ? 'var(--color-primary-glow)' : 'transparent';
+                        it.id === line.item_id ? 'var(--color-info-glow)' : 'transparent';
                     }}
                   >
                     <strong>[{it.sku}]</strong> {it.name} ({it.unit_code})
@@ -798,7 +789,7 @@ function CustomerLineRow({
           <input
             type="text"
             className="input"
-            placeholder="e.g. Monthly crane rental fee"
+            placeholder="e.g. Monthly crane rental or service fee"
             value={line.description}
             disabled={disabled}
             onChange={(e) => onUpdate({ description: e.target.value })}
@@ -823,7 +814,7 @@ function CustomerLineRow({
           />
         </div>
 
-        {/* Unit Price (up to 4 decimal places) */}
+        {/* Unit Price (SAR) */}
         <div>
           <label style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)' }}>Unit Price *</label>
           <input
@@ -831,7 +822,7 @@ function CustomerLineRow({
             step="any"
             min="0"
             className="input"
-            placeholder="0.0000"
+            placeholder="0.00"
             value={line.unit_price}
             disabled={disabled}
             onChange={(e) => onUpdate({ unit_price: e.target.value })}
@@ -850,7 +841,7 @@ function CustomerLineRow({
               fontWeight: 700,
               fontFamily: 'var(--font-mono)',
               textAlign: 'right',
-              color: 'var(--color-primary)',
+              color: 'var(--color-info)',
             }}
           >
             {lineTotal}

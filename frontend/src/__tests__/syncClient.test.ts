@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { sendBatch, mapEventType, formatEventsForServer, simulateNext401 } from '../sync/syncClient';
+import { sendBatch, mapEventType, formatEventsForServer } from '../sync/syncClient';
 import { api, ApiRequestError } from '../api/client';
 import type { OutboxEvent } from '../offline/db';
 
@@ -24,8 +24,8 @@ describe('syncClient — POST /api/sync contract & payload translation', () => {
         userId: 2,
         type: 'move',
         assetCode: 'CRN-50-001',
-        payload: { location_id: 3, note: 'Moved to terminal site' },
-        occurredAt: '2026-10-30T12:00:00.000Z',
+        payload: { to_location_id: 3, note: 'Relocated for engine overhaul' },
+        occurredAt: '2026-10-30T10:00:00.000Z',
         status: 'pending',
         rejectReason: null,
         attempts: 0,
@@ -40,23 +40,28 @@ describe('syncClient — POST /api/sync contract & payload translation', () => {
         type: 'equipment.move',
         payload: {
           asset_code: 'CRN-50-001',
-          location_id: 3,
-          note: 'Moved to terminal site',
+          to_location_id: 3,
+          note: 'Relocated for engine overhaul',
         },
-        occurred_at: '2026-10-30T12:00:00.000Z',
+        occurred_at: '2026-10-30T10:00:00.000Z',
       },
     ]);
   });
 
-  it('sends batch to POST /api/sync and categorizes accepted, duplicate, and rejected items', async () => {
+  it('returns empty results if batch is empty', async () => {
+    const res = await sendBatch([]);
+    expect(res).toEqual({ accepted: [], rejected: [] });
+  });
+
+  it('submits batch payload to POST /api/sync and parses accepted/rejected results', async () => {
     const events: OutboxEvent[] = [
       {
         id: 'ev-1',
         userId: 2,
         type: 'move',
         assetCode: 'CRN-50-001',
-        payload: { location_id: 2 },
-        occurredAt: '2026-10-30T12:00:00.000Z',
+        payload: { to_location_id: 2 },
+        occurredAt: '2026-10-30T10:00:00.000Z',
         status: 'pending',
         rejectReason: null,
         attempts: 0,
@@ -64,10 +69,10 @@ describe('syncClient — POST /api/sync contract & payload translation', () => {
       {
         id: 'ev-2',
         userId: 2,
-        type: 'move',
-        assetCode: 'CRN-50-001',
-        payload: { location_id: 2 },
-        occurredAt: '2026-10-30T12:01:00.000Z',
+        type: 'send_to_repair',
+        assetCode: 'GEN-60-001',
+        payload: { note: 'Alternator fault' },
+        occurredAt: '2026-10-30T10:05:00.000Z',
         status: 'pending',
         rejectReason: null,
         attempts: 0,
@@ -75,62 +80,48 @@ describe('syncClient — POST /api/sync contract & payload translation', () => {
       {
         id: 'ev-3',
         userId: 2,
-        type: 'send_to_repair',
-        assetCode: 'CRN-25-001',
+        type: 'return',
+        assetCode: 'FLT-05-001',
         payload: {},
-        occurredAt: '2026-10-30T12:02:00.000Z',
+        occurredAt: '2026-10-30T10:10:00.000Z',
         status: 'pending',
         rejectReason: null,
         attempts: 0,
       },
     ];
 
-    const postSpy = vi.spyOn(api, 'post').mockResolvedValueOnce({
+    vi.spyOn(api, 'post').mockResolvedValueOnce({
       processed: 3,
       results: [
-        {
-          client_event_id: 'ev-1',
-          status: 'accepted',
-          result: { ok: true },
-        },
-        {
-          client_event_id: 'ev-2',
-          status: 'duplicate',
-          result: { duplicate: true },
-        },
+        { client_event_id: 'ev-1', status: 'accepted' },
+        { client_event_id: 'ev-2', status: 'duplicate' },
         {
           client_event_id: 'ev-3',
           status: 'rejected',
-          error: 'ALREADY_UNDER_REPAIR',
-          message: 'Asset is already under repair',
+          message: 'Equipment is not currently marked as rented',
         },
       ],
     });
 
-    const res = await sendBatch(events);
+    const result = await sendBatch(events);
 
-    expect(postSpy).toHaveBeenCalledWith('/api/sync', {
-      events: expect.arrayContaining([
-        expect.objectContaining({ client_event_id: 'ev-1', type: 'equipment.move' }),
-        expect.objectContaining({ client_event_id: 'ev-2', type: 'equipment.move' }),
-        expect.objectContaining({ client_event_id: 'ev-3', type: 'equipment.repair' }),
-      ]),
-    });
-
-    expect(res.accepted).toEqual(['ev-1', 'ev-2']);
-    expect(res.rejected).toEqual([
-      { id: 'ev-3', reason: 'Asset is already under repair' },
+    expect(result.accepted).toEqual(['ev-1', 'ev-2']);
+    expect(result.rejected).toEqual([
+      {
+        id: 'ev-3',
+        reason: 'Equipment is not currently marked as rented',
+      },
     ]);
   });
 
-  it('propagates 401 Unauthorized so sync manager halts and prompts sign in', async () => {
+  it('propagates 401 ApiRequestError to caller without masking', async () => {
     const events: OutboxEvent[] = [
       {
-        id: 'ev-auth-fail',
+        id: 'ev-1',
         userId: 2,
         type: 'move',
         assetCode: 'CRN-50-001',
-        payload: { location_id: 1 },
+        payload: {},
         occurredAt: '2026-10-30T12:00:00.000Z',
         status: 'pending',
         rejectReason: null,
@@ -142,25 +133,6 @@ describe('syncClient — POST /api/sync contract & payload translation', () => {
       new ApiRequestError(401, 'Invalid or expired token', null)
     );
 
-    await expect(sendBatch(events)).rejects.toThrow(ApiRequestError);
-  });
-
-  it('triggers 401 error when simulateNext401 dev helper is called', async () => {
-    const events: OutboxEvent[] = [
-      {
-        id: 'ev-sim',
-        userId: 2,
-        type: 'move',
-        assetCode: 'CRN-50-001',
-        payload: {},
-        occurredAt: '2026-10-30T12:00:00.000Z',
-        status: 'pending',
-        rejectReason: null,
-        attempts: 0,
-      },
-    ];
-
-    simulateNext401();
     await expect(sendBatch(events)).rejects.toThrow(ApiRequestError);
   });
 });

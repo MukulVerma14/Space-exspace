@@ -10,7 +10,7 @@ import * as equipmentSource from '../data/equipmentSource';
 import * as materialsSource from '../data/materialsSource';
 import * as dbModule from '../offline/db';
 import { enqueueEvent, listEvents, discardEvent, markRejected } from '../offline/outbox';
-import type { MockEquipment } from '../mocks/equipmentMock';
+import type { MockEquipment } from '../data/equipmentSource';
 import type { MaterialItem } from '../data/materialsSource';
 
 describe('Admin Dashboard Operations Intelligence (F-S3)', () => {

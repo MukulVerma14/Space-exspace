@@ -6,10 +6,11 @@ import {
   fetchLiveEquipmentByCode,
   resolveEquipmentByCode,
   EquipmentDetail,
+  MockEquipment,
 } from '../data/equipmentSource';
 import { api, ApiRequestError } from '../api/client';
+import * as clientModule from '../api/client';
 import * as dbModule from '../offline/db';
-import type { MockEquipment } from '../mocks/equipmentMock';
 
 describe('equipmentSource — live and offline fallback', () => {
   const dummyEquipment: MockEquipment[] = [
@@ -31,22 +32,20 @@ describe('equipmentSource — live and offline fallback', () => {
   const dummyDetail: EquipmentDetail = {
     ...dummyEquipment[0],
     model_id: 1,
-    capacity_value: '50.00',
-    capacity_unit: 'ton',
+    capacity_value: 50,
+    capacity_unit: 't',
     current_location_id: 1,
     location_history: [
       {
-        id: 10,
+        id: 101,
         location_id: 1,
         location_name: 'Dammam Main Yard',
         location_kind: 'yard',
-        moved_at: '2026-10-28T09:00:00Z',
-        note: 'Yard intake check',
-        moved_by_name: 'Staff Technician',
+        moved_at: '2026-10-15T08:00:00Z',
+        note: 'Returned from project',
+        moved_by_name: 'Tariq Al-Amri',
       },
     ],
-    active_rental: null,
-    open_maintenance: null,
   };
 
   beforeEach(() => {
@@ -88,11 +87,13 @@ describe('equipmentSource — live and offline fallback', () => {
     expect(result[0].asset_code).toBe('CRN-50-001');
   });
 
-  it('saves snapshot and returns source live when online', async () => {
+  it('saves snapshot and returns source live on cold start with fresh etag', async () => {
     vi.stubGlobal('navigator', { onLine: true });
-    vi.spyOn(api, 'get').mockResolvedValueOnce({
-      items: dummyEquipment,
-      pagination: { total: 1, page: 1, limit: 100, totalPages: 1, hasNext: false },
+    vi.spyOn(dbModule, 'loadSnapshot').mockResolvedValueOnce(null);
+    vi.spyOn(clientModule, 'fetchSnapshotWithEtag').mockResolvedValueOnce({
+      notModified: false,
+      etag: 'W/"snap-123"',
+      data: { equipment: dummyEquipment, locations: [] },
     });
     const saveSnapshotSpy = vi.spyOn(dbModule, 'saveSnapshot').mockResolvedValue();
 
@@ -100,12 +101,33 @@ describe('equipmentSource — live and offline fallback', () => {
     expect(res.source).toBe('live');
     expect(res.items).toHaveLength(1);
     expect(res.error).toBeNull();
-    expect(saveSnapshotSpy).toHaveBeenCalledWith(2, 'equipment-list', dummyEquipment);
+    expect(saveSnapshotSpy).toHaveBeenCalledWith(2, 'equipment-list', dummyEquipment, 'W/"snap-123"');
   });
 
-  it('falls back to snapshot with error message when live fetch fails', async () => {
+  it('reuses local snapshot when server returns 304 Not Modified with If-None-Match', async () => {
     vi.stubGlobal('navigator', { onLine: true });
-    vi.spyOn(api, 'get').mockRejectedValueOnce(new Error('Network connection timeout'));
+    vi.spyOn(dbModule, 'loadSnapshot').mockResolvedValueOnce({
+      data: dummyEquipment,
+      savedAt: '2026-11-06T10:00:00.000Z',
+      etag: 'W/"snap-123"',
+    });
+    vi.spyOn(clientModule, 'fetchSnapshotWithEtag').mockResolvedValueOnce({
+      notModified: true,
+      etag: 'W/"snap-123"',
+    });
+
+    const res = await loadEquipment(2);
+    expect(res.source).toBe('live');
+    expect(res.items).toHaveLength(1);
+    expect(res.items[0].asset_code).toBe('CRN-50-001');
+    expect(res.savedAt).toBe('2026-11-06T10:00:00.000Z');
+  });
+
+  it('falls back to snapshot with error message when live snapshot fetch fails', async () => {
+    vi.stubGlobal('navigator', { onLine: true });
+    vi.spyOn(clientModule, 'fetchSnapshotWithEtag').mockRejectedValueOnce(
+      new Error('Network connection timeout')
+    );
     vi.spyOn(dbModule, 'loadSnapshot').mockResolvedValueOnce({
       data: dummyEquipment,
       savedAt: '2026-10-30T10:00:00.000Z',

@@ -11,7 +11,7 @@
 import { api } from '../api/client';
 import { loadEquipment, DataSource } from './equipmentSource';
 import { loadMaterials, MaterialItem } from './materialsSource';
-import type { MockEquipment } from '../mocks/equipmentMock';
+import type { MockEquipment } from './equipmentSource';
 
 export interface OverdueReturnItem {
   id: number;

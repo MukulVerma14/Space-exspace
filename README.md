@@ -178,6 +178,7 @@ docker compose -f docker-compose.prod.yml up -d
 - [ADR 015: Client-Side Encrypted Off-Site Backups and Lifecycle Retention](docs/decisions/015-client-side-encrypted-backups.md)
 - [ADR 016: Store-Only Issued Customer Invoices, Math Reconciliation Invariants, and Payment State Auditing](docs/decisions/016-store-only-issued-customer-invoices-and-reconciliation.md)
 - [ADR 017: Arbitrary-Precision Decimal Money Math, 4-Decimal Unit Prices, Half-Up Rounding Rule, and Compensating Reversals for Voided Invoices](docs/decisions/017-decimal-money-math-4-decimal-unit-prices-and-compensating-void-reversals.md)
+- [ADR 018: Prototype JWT Storage in LocalStorage, XSS Defenses, and Production Same-Origin HttpOnly Cookie Strategy](docs/decisions/018-prototype-jwt-localstorage-and-production-cookie-strategy.md)
 
 ## Documentation & Architecture
 - [Administrator & Operations Guide](docs/ADMIN_GUIDE.md)

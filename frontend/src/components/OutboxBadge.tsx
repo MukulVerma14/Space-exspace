@@ -12,7 +12,6 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useSync } from '../hooks/useSync';
 import { resetSyncAuth, runSync } from '../sync/syncManager';
-import { simulateNext401 } from '../sync/syncClient';
 import { useOutbox } from '../hooks/useOutbox';
 import { discardEvent, enqueueEvent, markRejected } from '../offline/outbox';
 
@@ -185,10 +184,8 @@ export function OutboxBadge() {
               </button>
               <button
                 type="button"
-                onClick={() => simulateNext401()}
                 style={{ fontSize: 'var(--text-xs)', cursor: 'pointer', marginLeft: 8 }}
               >
-                sim 401 next
               </button>
             </div>
           )}

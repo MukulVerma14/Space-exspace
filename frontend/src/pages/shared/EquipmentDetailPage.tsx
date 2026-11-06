@@ -35,7 +35,7 @@ import {
   AppLocation,
   DataSource,
 } from '../../data/equipmentSource';
-import { EquipmentStatus, EquipmentCondition } from '../../mocks/equipmentMock';
+import { EquipmentStatus, EquipmentCondition } from '../../data/equipmentSource';
 
 const STATUS_LABELS: Record<EquipmentStatus, string> = {
   available: 'Available',

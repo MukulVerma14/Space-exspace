@@ -1094,3 +1094,95 @@ npm run dev:frontend   # http://localhost:5173
 
 > The Admin Dashboard provides operations directors with real-time operational intelligence across four key pillars: high-level equipment fleet status counts, proactive alerting for overdue rental returns with days-overdue tracking, inventory warnings for materials at or below reorder levels, and a live offline sync monitor showing queued actions or server-rejected events with one-click discard. All metrics compute seamlessly whether connected to the live server or running offline from IndexedDB snapshots.
 
+
+
+---
+
+## F-S4 — Cold Start ETag Snapshot, Searchable Party Picker, Editable VAT with decimal.js, Clock Offset Reset, Dead Code Removal & ADR 018
+
+**Date:** 2026-11-06  
+**Status:** ✅ Complete
+
+---
+
+### What Was Built / Changed
+
+| File | Purpose |
+|---|---|
+| `backend/src/controllers/partiesController.ts` | Minimal admin-only `GET /api/parties?role=customer|supplier` controller returning id, name, and role. |
+| `backend/src/routes/partiesRoutes.ts` | Parties router with `authenticateToken` and `requireRole(['admin'])`. |
+| `backend/src/app.ts` | Mounted `/api/parties` router. |
+| `backend/src/__tests__/parties.test.ts` | Integration test suite (7 tests) verifying customer/supplier filtering, admin-only authorization, 401 unauthenticated, and 403 staff rejection. |
+| `frontend/src/api/client.ts` | Added `fetchSnapshotWithEtag<T>(path, cachedEtag)` handling conditional `If-None-Match` with HTTP 304 response, plus clear 403 Forbidden messages. |
+| `frontend/src/offline/db.ts` | Enhanced `saveSnapshot` and `loadSnapshot` with ETag metadata persistence. |
+| `frontend/src/data/equipmentSource.ts` | Refactored `loadEquipment(userId)` to use `GET /api/sync/snapshot` with conditional `If-None-Match` ETag validation instead of paging. Moved `MockEquipment`, `EquipmentStatus`, and `EquipmentCondition` types here. |
+| `frontend/src/components/SearchablePartyPicker.tsx` | Searchable customer/supplier picker querying `/api/parties?role=` with search filtering and clear selection. |
+| `frontend/src/data/invoicesSource.ts` | Updated `computeInvoiceTotals(lines, vatRatePercent)` using `decimal.js` arbitrary-precision arithmetic for unit prices, line totals, subtotal, VAT, and invoice total. |
+| `frontend/src/components/NewSupplierInvoiceModal.tsx` | Integrated `SearchablePartyPicker` and editable VAT rate input (15.00% default) with live decimal calculation. |
+| `frontend/src/components/NewCustomerInvoiceModal.tsx` | Integrated `SearchablePartyPicker` and editable VAT rate input (15.00% default) with live decimal calculation. |
+| `frontend/src/context/AuthContext.tsx` | Reset calibrated clock offset to 0 (`resetClockOffset()`) on logout and 401 session invalidation. |
+| `frontend/src/router/RequireAuth.tsx` | Rendered clear 403 Access Denied explanation and return link when staff access admin routes. |
+| `frontend/src/mocks/equipmentMock.ts` | **Deleted.** Removed static equipment mock data completely. |
+| `frontend/src/sync/syncClient.ts` | Removed unused `simulateNext401` export. |
+| `docs/decisions/018-prototype-jwt-localstorage-and-production-cookie-strategy.md` | Created ADR 018 documenting prototype localStorage JWT storage, XSS mitigations, and production httpOnly Secure SameSite cookie strategy. |
+| `README.md` | Linked ADR 018 in Architectural Decision Records section. |
+
+---
+
+### Why — Key Design Decisions
+
+#### 1. Equipment Cold Start with HTTP 304 / ETag
+**Decision:** Instead of multiple paginated queries (`GET /api/equipment?page=1...N`), the client calls `GET /api/sync/snapshot` passing the local cached snapshot's ETag in the `If-None-Match` header.  
+**Why:** If the equipment fleet has not changed on the server, the server immediately returns HTTP 304 Not Modified (zero entity body). The client reuses the existing IndexedDB snapshot with zero bandwidth and minimal database load.
+
+#### 2. Searchable Party Picker & Admin-Only Minimal Endpoint
+**Decision:** Added `GET /api/parties?role=supplier` and `GET /api/parties?role=customer` guarded by `requireRole(['admin'])`. The frontend `SearchablePartyPicker` fetches the relevant party records, lets the administrator type to filter, and selects the party ID.  
+**Why:** Replaces brittle hardcoded party IDs with actual customer/supplier records from PostgreSQL while maintaining strict administrative isolation (staff receive 403 Forbidden).
+
+#### 3. Editable VAT Rate with Arbitrary-Precision Math (decimal.js)
+**Decision:** Invoice creation forms now allow administrators to edit the VAT rate (defaulting to 15.00%). Calculations for line totals, subtotal, VAT amount, and grand total are performed using `decimal.js` with half-up rounding.  
+**Why:** Standard JavaScript IEEE 754 floating-point math causes rounding inaccuracies (e.g. 0.1 + 0.2 = 0.30000000000000004). Financial totals in Saudi Riyals must be mathematically sound and match server-side ledger invariants (ADR 016 & ADR 017).
+
+#### 4. Reset Clock Offset on Logout
+**Decision:** When a user logs out or has their session invalidated by a 401, `resetClockOffset()` resets the calibrated clock offset to 0.  
+**Why:** Ensures that clock skew calibration from one session does not leak or contaminate a different user's session or subsequent logins on shared yard devices.
+
+#### 5. Clear 403 Explanations
+**Decision:** Added user-friendly explanations in both the API client (`ApiRequestError`) and route guard (`RequireAuth.tsx`) stating that the action or route requires Administrator privileges.  
+**Why:** Prevents confusion when field staff attempt to navigate to administrative features or call restricted endpoints.
+
+#### 6. Removal of Dead Mock Data
+**Decision:** Deleted `frontend/src/mocks/equipmentMock.ts` and removed `simulateNext401` from `syncClient.ts`. Updated all imports across components and test suites.  
+**Why:** Eliminates leftover mock data and ensures the app relies solely on live API data and real IndexedDB offline snapshots.
+
+---
+
+### How to Test F-S4
+
+**1. Automated tests**
+```bash
+npm run test:backend
+# 162/162 passed (including 7 new tests in parties.test.ts)
+npm run test:frontend
+# 82/82 passed across all 8 test suites
+npm run build:frontend
+# tsc && vite build passes with 0 errors
+```
+
+**2. Manual testing checklist**
+```bash
+npm run dev:frontend   # http://localhost:5173
+```
+
+| Role | Test Step | Expected Result |
+|---|---|---|
+| Admin | Log in as admin (`admin@spaceexspace.com`) → Navigate to Invoices → "New Supplier Invoice" | Modal opens. Supplier field is a searchable picker with live suppliers. VAT rate is editable (defaults to 15.00%). Changing VAT % recalculates tax and total instantly using `decimal.js`. |
+| Admin | Check Network Tab on reload of `/admin/equipment` | First load: 200 OK with ETag. Subsequent load: `If-None-Match: <etag>` header sent; server returns 304 Not Modified; client uses cached IndexedDB snapshot. |
+| Staff | Log in as staff (`staff@spaceexspace.com`) → attempt to navigate to `/admin/invoices` | `RequireAuth` blocks route and displays clear 403 Forbidden card: *Access Denied. Your account (Staff) does not have permission to view this page.* |
+| Staff | Log in as staff → Click Log Out | IndexedDB wiped, token removed, and clock offset reset to 0. |
+
+---
+
+### 30-Second Explanation
+
+> Step F-S4 completes the frontend transition to production-grade architecture: equipment cold starts now use `GET /api/sync/snapshot` with HTTP 304 conditional ETag validation to eliminate redundant data transfer; hardcoded party pickers are replaced with an admin-only searchable customer/supplier selector; VAT rates are editable and previewed with `decimal.js` arbitrary precision; clock offsets reset on logout; 403 errors surface human-readable explanations; and all leftover mock equipment files and test helpers are cleaned up.

@@ -29,7 +29,7 @@ import { loadEquipment, DataSource } from '../../data/equipmentSource';
 import {
   MockEquipment,
   EquipmentStatus,
-} from '../../mocks/equipmentMock';
+} from '../../data/equipmentSource';
 
 // ─── Status config ─────────────────────────────────────────────────────────────
 

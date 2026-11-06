@@ -10,6 +10,7 @@
  * and never rendered as executable or clickable link schemes.
  */
 
+import Decimal from 'decimal.js';
 import { api } from '../api/client';
 import { formatMoney } from './materialsSource';
 
@@ -31,17 +32,18 @@ export interface InvoiceListItem {
   status: InvoiceStatus;
   paid_on: string | null;
   paid_by: number | null;
-  paid_by_name: string | null;
-  voided_by: number | null;
-  voided_by_name: string | null;
+  paid_by_name?: string | null;
   voided_at: string | null;
-  void_reason: string | null;
+  voided_by: number | null;
+  voided_by_name?: string | null;
+  void_reason?: string | null;
   file_url: string | null;
+  notes?: string | null;
+  line_count?: number;
   created_at: string;
-  line_count: number;
 }
 
-export interface InvoiceLine {
+export interface InvoiceLineItem {
   line_no: number;
   description: string;
   item_id: number | null;
@@ -49,15 +51,22 @@ export interface InvoiceLine {
   item_name?: string | null;
   quantity: string | number;
   unit_id: number;
-  unit_code: string;
+  unit_code?: string;
   unit_price: string | number;
   line_total: string | number;
 }
 
 export interface InvoiceDetail extends InvoiceListItem {
   party_vat_no?: string | null;
-  notes?: string | null;
-  lines: InvoiceLine[];
+  lines: InvoiceLineItem[];
+}
+
+export interface InvoicesQueryParams {
+  direction?: 'all' | 'received' | 'issued';
+  status?: 'all' | 'unpaid' | 'paid' | 'void';
+  party_id?: number;
+  page?: number;
+  limit?: number;
 }
 
 export interface InvoicesListResponse {
@@ -68,14 +77,6 @@ export interface InvoicesListResponse {
     total: number;
     total_pages: number;
   };
-}
-
-export interface InvoicesQueryParams {
-  direction?: InvoiceDirection | 'all';
-  status?: InvoiceStatus | 'all';
-  party_id?: number;
-  page?: number;
-  limit?: number;
 }
 
 export interface CreateSupplierInvoiceLinePayload {
@@ -147,28 +148,82 @@ export interface MarkInvoicePaymentResponse {
   data: MarkInvoicePaymentData;
 }
 
+export interface PartyItem {
+  id: number;
+  name: string;
+  contact_person: string | null;
+  phone: string | null;
+  email: string | null;
+  vat_no: string | null;
+  address: string | null;
+  notes?: string | null;
+  line_count?: number;
+  is_customer: boolean;
+  is_supplier: boolean;
+  active: boolean;
+  created_at: string;
+}
+
 /**
- * Accurately computes invoice totals (subtotal, 15% VAT, total) with 2-decimal half-up rounding.
+ * Accurately computes invoice totals (subtotal, configurable VAT %, grand total)
+ * using arbitrary-precision decimal arithmetic (decimal.js) with standard commercial half-up rounding.
  */
 export function computeInvoiceTotals(
-  lines: Array<{ quantity: number | string; unit_price: number | string }>
-): { subtotal: number; vat_amount: number; total: number } {
-  let subtotalCents = 0;
+  lines: Array<{ quantity: number | string; unit_price: number | string }>,
+  vatRatePercent: number | string = 15
+): { subtotal: number; vat_amount: number; total: number; vat_rate: number } {
+  let subtotal = new Decimal(0);
+  const vatRate = new Decimal(
+    vatRatePercent !== undefined && vatRatePercent !== '' ? String(vatRatePercent) : '0'
+  );
+
   for (const line of lines) {
-    const q = parseFloat(String(line.quantity)) || 0;
-    const p = parseFloat(String(line.unit_price)) || 0;
-    const lineTotal = Math.round(q * p * 100);
-    subtotalCents += lineTotal;
+    let q: Decimal;
+    let p: Decimal;
+    try {
+      q = new Decimal(String(line.quantity || 0));
+      if (!q.isFinite() || q.isNaN()) q = new Decimal(0);
+    } catch {
+      q = new Decimal(0);
+    }
+    try {
+      p = new Decimal(String(line.unit_price || 0));
+      if (!p.isFinite() || p.isNaN()) p = new Decimal(0);
+    } catch {
+      p = new Decimal(0);
+    }
+    const lineTotal = q.times(p).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+    subtotal = subtotal.plus(lineTotal);
   }
-  const subtotal = subtotalCents / 100;
-  const vatAmount = Math.round(subtotal * 15) / 100;
-  const total = Math.round((subtotal + vatAmount) * 100) / 100;
+
+  const roundedSubtotal = subtotal.toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+  const vatAmount = roundedSubtotal
+    .times(vatRate.dividedBy(100))
+    .toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+  const total = roundedSubtotal.plus(vatAmount).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
 
   return {
-    subtotal,
-    vat_amount: vatAmount,
-    total,
+    subtotal: roundedSubtotal.toNumber(),
+    vat_amount: vatAmount.toNumber(),
+    total: total.toNumber(),
+    vat_rate: vatRate.toNumber(),
   };
+}
+
+/**
+ * Fetches parties from the backend with role and optional search filter.
+ * Admin only.
+ */
+export async function fetchParties(
+  role?: 'customer' | 'supplier',
+  search?: string
+): Promise<PartyItem[]> {
+  const params: string[] = [];
+  if (role) params.push(`role=${encodeURIComponent(role)}`);
+  if (search && search.trim()) params.push(`search=${encodeURIComponent(search.trim())}`);
+  const query = params.length > 0 ? `?${params.join('&')}` : '';
+  const res = await api.get<{ data: PartyItem[]; count: number }>(`/api/parties${query}`);
+  return res.data || [];
 }
 
 /**

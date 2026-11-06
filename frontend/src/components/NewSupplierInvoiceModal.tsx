@@ -1,8 +1,10 @@
 /**
  * NewSupplierInvoiceModal — Dynamic line item form for recording received supplier invoices.
  *
- * Requirements (F-I3):
+ * Requirements (F-I3, F-S4):
  * - Form with dynamic lines (item, quantity, unit, unit price).
+ * - Searchable supplier party picker (GET /api/parties?role=supplier).
+ * - Editable VAT rate with 15% default and arbitrary-precision preview totals via decimal.js.
  * - Show computed totals but let the server be the authority.
  * - Show server errors clearly (validation, mismatch, duplicate 409).
  * - Debounce item search.
@@ -21,6 +23,7 @@ import {
   CreateSupplierInvoicePayload,
 } from '../data/invoicesSource';
 import { ApiRequestError } from '../api/client';
+import SearchablePartyPicker from './SearchablePartyPicker';
 
 interface NewSupplierInvoiceModalProps {
   isOpen: boolean;
@@ -39,12 +42,6 @@ interface FormLine {
   unit_code: string;
   unit_price: string;
 }
-
-const SEEDED_SUPPLIERS = [
-  { id: 1, name: 'Gulf Heavy Metals Trading' },
-  { id: 2, name: 'Red Sea Industrial Hardware' },
-  { id: 3, name: 'Eastern Coatings & Primers Co.' },
-];
 
 function getTodayString(): string {
   return new Date().toISOString().split('T')[0];
@@ -82,9 +79,8 @@ export default function NewSupplierInvoiceModal({
   const [catalogLoading, setCatalogLoading] = useState(false);
 
   // Form Header State
-  const [partyId, setPartyId] = useState<number>(1);
-  const [customPartyId, setCustomPartyId] = useState<string>('');
-  const [isCustomParty, setIsCustomParty] = useState(false);
+  const [partyId, setPartyId] = useState<number | null>(null);
+  const [vatRate, setVatRate] = useState<string>('15.00');
   const [invoiceNo, setInvoiceNo] = useState('');
   const [invoiceDate, setInvoiceDate] = useState(getTodayString());
   const [dueDate, setDueDate] = useState(getFutureDateString(30));
@@ -114,9 +110,8 @@ export default function NewSupplierInvoiceModal({
   // Reset form when reopened
   useEffect(() => {
     if (isOpen) {
-      setPartyId(1);
-      setCustomPartyId('');
-      setIsCustomParty(false);
+      setPartyId(null);
+      setVatRate('15.00');
       setInvoiceNo('');
       setInvoiceDate(getTodayString());
       setDueDate(getFutureDateString(30));
@@ -129,19 +124,20 @@ export default function NewSupplierInvoiceModal({
     }
   }, [isOpen]);
 
-  // Client-side computed totals (server remains final authority)
+  // Client-side computed totals with decimal.js (server remains final authority)
   const computedTotals = useMemo(() => {
     return computeInvoiceTotals(
-      lines.map((l) => ({ quantity: l.quantity, unit_price: l.unit_price }))
+      lines.map((l) => ({ quantity: l.quantity, unit_price: l.unit_price })),
+      vatRate
     );
-  }, [lines]);
+  }, [lines, vatRate]);
 
   // Line modification helpers
   function updateLine(index: number, updates: Partial<FormLine>) {
     setLines((prev) => {
-      const copy = [...prev];
-      copy[index] = { ...copy[index], ...updates };
-      return copy;
+      const next = [...prev];
+      next[index] = { ...next[index], ...updates };
+      return next;
     });
   }
 
@@ -159,10 +155,8 @@ export default function NewSupplierInvoiceModal({
     e.preventDefault();
     setServerError(null);
 
-    const finalPartyId = isCustomParty ? parseInt(customPartyId, 10) : partyId;
-
-    if (!finalPartyId || isNaN(finalPartyId) || finalPartyId <= 0) {
-      setServerError('Please select or specify a valid supplier party ID.');
+    if (!partyId || partyId <= 0) {
+      setServerError('Please select a valid supplier party from the picker.');
       return;
     }
 
@@ -196,7 +190,7 @@ export default function NewSupplierInvoiceModal({
 
     // Prepare payload (subtotal, vat_amount, and total sent as computed numbers)
     const payload: CreateSupplierInvoicePayload = {
-      party_id: finalPartyId,
+      party_id: partyId,
       invoice_no: invoiceNo.trim(),
       invoice_date: invoiceDate,
       due_date: dueDate,
@@ -313,8 +307,8 @@ export default function NewSupplierInvoiceModal({
         <form
           onSubmit={handleSubmit}
           style={{
-            overflowY: 'auto',
             padding: 'var(--space-6)',
+            overflowY: 'auto',
             display: 'flex',
             flexDirection: 'column',
             gap: 'var(--space-5)',
@@ -341,53 +335,19 @@ export default function NewSupplierInvoiceModal({
                 gap: 'var(--space-4)',
               }}
             >
-              {/* Supplier Party */}
+              {/* Searchable Supplier Party */}
               <div className="form-field">
                 <label className="form-label" htmlFor="supplier-party-select">
                   Supplier Party *
                 </label>
-                {!isCustomParty ? (
-                  <select
-                    id="supplier-party-select"
-                    className="select"
-                    value={partyId}
-                    disabled={submitting}
-                    onChange={(e) => {
-                      if (e.target.value === 'custom') {
-                        setIsCustomParty(true);
-                      } else {
-                        setPartyId(parseInt(e.target.value, 10));
-                      }
-                    }}
-                  >
-                    {SEEDED_SUPPLIERS.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name} (ID: {s.id})
-                      </option>
-                    ))}
-                    <option value="custom">+ Other Party ID...</option>
-                  </select>
-                ) : (
-                  <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-                    <input
-                      type="number"
-                      className="input"
-                      placeholder="Enter Supplier ID"
-                      value={customPartyId}
-                      disabled={submitting}
-                      onChange={(e) => setCustomPartyId(e.target.value)}
-                      required
-                    />
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      onClick={() => setIsCustomParty(false)}
-                      disabled={submitting}
-                    >
-                      Presets
-                    </button>
-                  </div>
-                )}
+                <SearchablePartyPicker
+                  id="supplier-party-select"
+                  role="supplier"
+                  value={partyId}
+                  onChange={(p) => setPartyId(p?.id ?? null)}
+                  required
+                  disabled={submitting}
+                />
               </div>
 
               {/* Invoice Number */}
@@ -434,69 +394,106 @@ export default function NewSupplierInvoiceModal({
                   className="input"
                   value={dueDate}
                   disabled={submitting}
+                  min={invoiceDate}
                   onChange={(e) => setDueDate(e.target.value)}
                   required
                 />
               </div>
+            </div>
 
-              {/* File Reference String */}
-              <div className="form-field" style={{ gridColumn: 'span 2' }}>
+            {/* Optional Notes and Plain-Text File URL */}
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+                gap: 'var(--space-4)',
+                marginTop: 'var(--space-4)',
+              }}
+            >
+              <div className="form-field">
                 <label className="form-label" htmlFor="supplier-file-url">
-                  File Reference String (Plain Text, max 500 chars)
+                  Physical Invoice Reference (Plain Text)
                 </label>
                 <input
                   id="supplier-file-url"
                   type="text"
                   className="input"
-                  placeholder="e.g. S3://backups/invoices/2026/inv-901.pdf or scan-ref-901.pdf"
+                  placeholder="e.g. Binder 2026/04, Shelf B-2, or s3://invoices/inv-001.pdf"
                   value={fileUrl}
-                  maxLength={500}
                   disabled={submitting}
                   onChange={(e) => setFileUrl(e.target.value)}
                 />
-                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-subtle)' }}>
-                  Plain document reference only. Executable URL schemes are rejected.
+                <span style={{ fontSize: '0.7rem', color: 'var(--color-text-subtle)' }}>
+                  Plain text reference only; never rendered as clickable links.
                 </span>
               </div>
 
-              {/* Record Stock Movement Checkbox */}
-              <div
-                className="form-field"
+              <div className="form-field">
+                <label className="form-label" htmlFor="supplier-notes">
+                  Internal Notes
+                </label>
+                <input
+                  id="supplier-notes"
+                  type="text"
+                  className="input"
+                  placeholder="Optional notes or PO number"
+                  value={notes}
+                  disabled={submitting}
+                  onChange={(e) => setNotes(e.target.value)}
+                />
+              </div>
+            </div>
+
+            {/* Stock Movement Checkbox */}
+            <div style={{ marginTop: 'var(--space-4)' }}>
+              <label
                 style={{
-                  gridColumn: 'span 2',
-                  flexDirection: 'row',
+                  display: 'flex',
                   alignItems: 'center',
                   gap: 'var(--space-2)',
+                  fontSize: 'var(--text-sm)',
+                  cursor: 'pointer',
                 }}
               >
                 <input
-                  id="record-stock-receipt-checkbox"
                   type="checkbox"
                   checked={recordStockReceipt}
                   disabled={submitting}
                   onChange={(e) => setRecordStockReceipt(e.target.checked)}
-                  style={{ width: 18, height: 18, accentColor: 'var(--color-primary)' }}
                 />
-                <label htmlFor="record-stock-receipt-checkbox" style={{ fontSize: 'var(--text-sm)', cursor: 'pointer' }}>
-                  <strong>Record inventory intake immediately</strong> (adds items to physical stock ledger as receipts)
-                </label>
-              </div>
+                <span>
+                  <strong>Record warehouse stock receipts immediately</strong> (increases current on-hand stock and updates material price history)
+                </span>
+              </label>
             </div>
           </div>
 
-          {/* Dynamic Lines Card */}
+          {/* Dynamic Line Items Section */}
           <div className="card" style={{ padding: 'var(--space-5)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-3)' }}>
-              <h3 style={{ fontSize: 'var(--text-base)', margin: 0, color: 'var(--color-primary)' }}>
-                2. Dynamic Line Items ({lines.length})
-              </h3>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginBottom: 'var(--space-4)',
+              }}
+            >
+              <div>
+                <h3 style={{ fontSize: 'var(--text-base)', margin: 0, color: 'var(--color-primary)' }}>
+                  2. Dynamic Line Items ({lines.length})
+                </h3>
+                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)' }}>
+                  Searchable materials catalog with 300ms debounce · 4-decimal unit price support
+                </span>
+              </div>
+
               <button
                 type="button"
-                id="add-invoice-line-btn"
-                className="btn btn-ghost"
+                id="add-supplier-line-btn"
+                className="btn btn-outline"
                 onClick={addLine}
                 disabled={submitting}
-                style={{ fontSize: 'var(--text-xs)', padding: 'var(--space-1) var(--space-3)' }}
+                style={{ fontSize: 'var(--text-xs)' }}
               >
                 + Add Line
               </button>
@@ -519,7 +516,7 @@ export default function NewSupplierInvoiceModal({
             </div>
           </div>
 
-          {/* Computed Totals Card (Server is final authority) */}
+          {/* Computed Totals Card with Editable VAT (decimal.js) */}
           <div
             className="card"
             style={{
@@ -534,6 +531,7 @@ export default function NewSupplierInvoiceModal({
                 gridTemplateColumns: 'repeat(3, 1fr)',
                 gap: 'var(--space-4)',
                 textAlign: 'center',
+                alignItems: 'center',
               }}
             >
               <div>
@@ -544,8 +542,24 @@ export default function NewSupplierInvoiceModal({
               </div>
 
               <div>
-                <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)' }}>Computed VAT (15%)</div>
-                <div style={{ fontSize: 'var(--text-lg)', fontWeight: 700, fontFamily: 'var(--font-mono)', color: 'var(--color-warning)' }}>
+                <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)', marginBottom: 2 }}>
+                  VAT Rate (%)
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max="100"
+                    className="input"
+                    value={vatRate}
+                    disabled={submitting}
+                    onChange={(e) => setVatRate(e.target.value)}
+                    style={{ width: 75, textAlign: 'right', padding: '2px 6px', fontSize: 'var(--text-sm)' }}
+                  />
+                  <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)' }}>%</span>
+                </div>
+                <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-warning)', marginTop: 2, fontFamily: 'var(--font-mono)' }}>
                   {formatMoney(computedTotals.vat_amount, user?.role)}
                 </div>
               </div>
@@ -559,7 +573,7 @@ export default function NewSupplierInvoiceModal({
             </div>
 
             <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-subtle)', textAlign: 'center', marginTop: 'var(--space-3)' }}>
-              * Totals are previewed client-side; the server is the single authoritative calculator and enforces exact decimal reconciliation.
+              * Totals are previewed client-side using decimal.js (half-up rounding); the server is the single authoritative calculator and enforces exact decimal reconciliation.
             </div>
           </div>
 

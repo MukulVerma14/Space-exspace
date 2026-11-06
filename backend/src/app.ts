@@ -10,6 +10,7 @@ import { equipmentRouter } from './routes/equipmentRoutes.js';
 import rentalsRouter from './routes/rentalsRoutes.js';
 import materialsRouter from './routes/materialsRoutes.js';
 import invoicesRouter from './routes/invoicesRoutes.js';
+import partiesRouter from './routes/partiesRoutes.js';
 import { syncRouter } from './routes/syncRoutes.js';
 import { labelsRouter } from './routes/labelsRoutes.js';
 
@@ -87,6 +88,9 @@ app.use('/api/materials', materialsRouter);
 
 // Stored invoices & supplier purchasing routes
 app.use('/api/invoices', invoicesRouter);
+
+// Parties (customers & suppliers) routes
+app.use('/api/parties', partiesRouter);
 
 // Offline sync replay routes
 app.use('/api/sync', syncRouter);

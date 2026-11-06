@@ -1,10 +1,12 @@
 /**
  * Equipment data source: live → snapshot → none.
  *
- *   Online:  fetch every page from GET /api/equipment, save a snapshot for this user,
- *            return source 'live'.
- *   Offline: return the last snapshot for this user, source 'snapshot' + savedAt.
- *   Nothing cached yet: source 'none'.
+ * Cold start (F-S4):
+ *   Uses GET /api/sync/snapshot with If-None-Match header rather than paging
+ *   through the entire equipment catalog.
+ *   - On HTTP 304 Not Modified: reuses local IndexedDB snapshot immediately (zero network payload).
+ *   - On HTTP 200: caches new snapshot along with the deterministic server ETag.
+ *   - On Offline: falls back to last saved snapshot with source 'snapshot'.
  *
  * QR Scan Resolution (F-S1):
  *   Resolves equipment by natural asset_code.
@@ -16,9 +18,29 @@
  *   Cached locations list for Move, Return, and Repair action pickers.
  */
 
-import { api, ApiRequestError } from '../api/client';
-import type { MockEquipment } from '../mocks/equipmentMock';
+import { api, ApiRequestError, fetchSnapshotWithEtag } from '../api/client';
 import { loadSnapshot, saveSnapshot } from '../offline/db';
+
+export type EquipmentStatus = 'available' | 'rented' | 'under_repair';
+export type EquipmentCondition = 'good' | 'fair' | 'needs_repair';
+
+export interface MockEquipment {
+  id: number;
+  asset_code: string;
+  make: string;
+  model: string;
+  type_name: string;
+  serial_no: string;
+  condition: EquipmentCondition;
+  status: EquipmentStatus;
+  current_location_name: string | null;
+  current_location_kind: string | null;
+  active: boolean;
+  current_rental_id?: number | null;
+  current_customer_name?: string | null;
+  current_site_name?: string | null;
+  current_rental_expected_end?: string | null;
+}
 
 export type DataSource = 'live' | 'snapshot' | 'none';
 
@@ -150,23 +172,57 @@ export async function fetchLiveEquipment(): Promise<MockEquipment[]> {
   throw new Error('Equipment list exceeded page guard');
 }
 
+/**
+ * Loads equipment using cold-start conditional GET /api/sync/snapshot with If-None-Match.
+ * If 304 Not Modified, returns the existing cached snapshot.
+ * If 200 OK, saves fresh equipment and locations with the new ETag.
+ * If offline or server error, returns local cached snapshot.
+ */
 export async function loadEquipment(userId: number): Promise<EquipmentResult> {
   let fetchError: string | null = null;
+  const isOnline = typeof navigator === 'undefined' ? true : navigator.onLine;
 
-  if (typeof navigator !== 'undefined' && navigator.onLine) {
+  let existingSnap = await loadSnapshot<MockEquipment[]>(userId, SNAPSHOT_NAME);
+
+  if (isOnline) {
     try {
-      const items = await fetchLiveEquipment();
-      await saveSnapshot(userId, SNAPSHOT_NAME, items);
-      return { items, source: 'live', savedAt: new Date().toISOString(), error: null };
+      const res = await fetchSnapshotWithEtag<{
+        equipment?: MockEquipment[];
+        locations?: AppLocation[];
+        etag?: string;
+      }>('/api/sync/snapshot', existingSnap?.etag);
+
+      if (res.notModified && existingSnap && existingSnap.data) {
+        // HTTP 304 Not Modified: Server confirms snapshot is fresh
+        return {
+          items: existingSnap.data,
+          source: 'live',
+          savedAt: existingSnap.savedAt,
+          error: null,
+        };
+      }
+
+      if (res.data && Array.isArray(res.data.equipment)) {
+        const items = res.data.equipment;
+        const newEtag = res.etag || res.data.etag || null;
+        await saveSnapshot(userId, SNAPSHOT_NAME, items, newEtag);
+
+        if (Array.isArray(res.data.locations) && res.data.locations.length > 0) {
+          await saveSnapshot(userId, LOCATIONS_SNAPSHOT, res.data.locations, newEtag);
+        }
+
+        return { items, source: 'live', savedAt: new Date().toISOString(), error: null };
+      }
     } catch (err: unknown) {
-      fetchError = err instanceof Error ? err.message : 'Failed to fetch live equipment';
+      fetchError = err instanceof Error ? err.message : 'Failed to fetch equipment snapshot';
     }
   }
 
-  const snap = await loadSnapshot<MockEquipment[]>(userId, SNAPSHOT_NAME);
-  if (snap) {
-    return { items: snap.data, source: 'snapshot', savedAt: snap.savedAt, error: fetchError };
+  // Fallback to existing snapshot if available
+  if (existingSnap && existingSnap.data) {
+    return { items: existingSnap.data, source: 'snapshot', savedAt: existingSnap.savedAt, error: fetchError };
   }
+
   return { items: [], source: 'none', savedAt: null, error: fetchError };
 }
 

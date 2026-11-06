@@ -24,7 +24,7 @@ import {
   EquipmentDetail,
   ResolveEquipmentResult,
 } from '../../data/equipmentSource';
-import { EquipmentStatus } from '../../mocks/equipmentMock';
+import { EquipmentStatus } from '../../data/equipmentSource';
 
 const STATUS_LABELS: Record<EquipmentStatus, string> = {
   available: 'Available',

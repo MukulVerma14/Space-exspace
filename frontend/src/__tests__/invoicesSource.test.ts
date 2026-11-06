@@ -6,6 +6,7 @@ import {
   createCustomerInvoice,
   markInvoicePayment,
   computeInvoiceTotals,
+  fetchParties,
   InvoiceListItem,
   InvoiceDetail,
   CreateSupplierInvoicePayload,
@@ -37,7 +38,6 @@ describe('invoicesSource — Data fetching, creation & role policy', () => {
       void_reason: null,
       file_url: 'uploads/invoices/inv-001.pdf',
       created_at: '2026-10-15T10:00:00Z',
-      line_count: 2,
     },
     {
       id: 2,
@@ -61,7 +61,6 @@ describe('invoicesSource — Data fetching, creation & role policy', () => {
       void_reason: null,
       file_url: null,
       created_at: '2026-10-20T10:00:00Z',
-      line_count: 1,
     },
   ];
 
@@ -82,7 +81,7 @@ describe('invoicesSource — Data fetching, creation & role policy', () => {
       expect(res.total).toBe(491.63);      // 427.50 + 64.13 = 491.63
     });
 
-    it('handles decimal quantities and 4-decimal unit prices cleanly', () => {
+    it('handles decimal quantities and 4-decimal unit prices cleanly with decimal.js', () => {
       const lines = [
         { quantity: '10.5', unit_price: '4.5555' }, // 47.83275 -> 47.83
       ];
@@ -91,6 +90,48 @@ describe('invoicesSource — Data fetching, creation & role policy', () => {
       expect(res.subtotal).toBe(47.83);
       expect(res.vat_amount).toBe(7.17); // 47.83 * 0.15 = 7.1745 -> 7.17
       expect(res.total).toBe(55.0);
+    });
+
+    it('supports customizable VAT rate percentage with decimal.js', () => {
+      const lines = [{ quantity: 10, unit_price: 100 }]; // 1000.00
+      const resZero = computeInvoiceTotals(lines, 0);
+      expect(resZero.subtotal).toBe(1000);
+      expect(resZero.vat_amount).toBe(0);
+      expect(resZero.total).toBe(1000);
+
+      const resFive = computeInvoiceTotals(lines, 5);
+      expect(resFive.subtotal).toBe(1000);
+      expect(resFive.vat_amount).toBe(50);
+      expect(resFive.total).toBe(1050);
+    });
+  });
+
+  describe('fetchParties', () => {
+    it('queries GET /api/parties with role and search query for admin', async () => {
+      const apiSpy = vi.spyOn(api, 'get').mockResolvedValueOnce({
+        data: [
+          {
+            id: 1,
+            name: 'Gulf Heavy Metals Trading',
+            contact_person: 'Ahmed',
+            phone: null,
+            email: null,
+            vat_no: '3000000001',
+            address: null,
+            notes: null,
+            is_customer: false,
+            is_supplier: true,
+            active: true,
+            created_at: '2026-10-27T00:00:00Z',
+          },
+        ],
+        count: 1,
+      });
+
+      const res = await fetchParties('supplier', 'Gulf');
+      expect(apiSpy).toHaveBeenCalledWith('/api/parties?role=supplier&search=Gulf');
+      expect(res).toHaveLength(1);
+      expect(res[0].name).toBe('Gulf Heavy Metals Trading');
     });
   });
 

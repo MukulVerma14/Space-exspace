@@ -10,6 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "decimal.js": "^10.6.0",
     "html5-qrcode": "^2.3.8",
     "idb": "^8.0.4",
     "react": "^18.3.1",

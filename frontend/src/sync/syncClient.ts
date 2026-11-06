@@ -7,7 +7,7 @@
  * - Preserves 401 propagation so the sync manager halts and prompts re-login.
  */
 
-import { api, ApiRequestError } from '../api/client';
+import { api } from '../api/client';
 import type { OutboxEvent } from '../offline/db';
 
 export interface BatchResult {
@@ -34,13 +34,6 @@ export interface ServerSyncResultItem {
 export interface ServerSyncResponse {
   processed: number;
   results: ServerSyncResultItem[];
-}
-
-let mockNext401 = false;
-
-/** Dev helper: make the next batch fail with 401, to test the re-login prompt. */
-export function simulateNext401(): void {
-  mockNext401 = true;
 }
 
 /**
@@ -87,12 +80,6 @@ export function formatEventsForServer(events: OutboxEvent[]): ServerSyncEvent[] 
 export async function sendBatch(events: OutboxEvent[]): Promise<BatchResult> {
   if (events.length === 0) {
     return { accepted: [], rejected: [] };
-  }
-
-  // Dev-only 401 simulation trigger
-  if (typeof import.meta !== 'undefined' && import.meta.env?.DEV && mockNext401) {
-    mockNext401 = false;
-    throw new ApiRequestError(401, 'Unauthorized', null);
   }
 
   const serverEvents = formatEventsForServer(events);

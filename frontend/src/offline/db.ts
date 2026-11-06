@@ -17,6 +17,7 @@ import { openDB, DBSchema, IDBPDatabase } from 'idb';
 export interface OfflineSnapshot<T> {
   data: T;
   savedAt: string; // ISO timestamp, shown to the user
+  etag?: string | null;
 }
 
 export interface OutboxEvent {
@@ -62,12 +63,17 @@ export function getDb(): Promise<IDBPDatabase<SxOfflineDB>> {
 
 // ── Snapshots (per user) ──────────────────────────────────────────────────────
 
-export async function saveSnapshot<T>(userId: number, name: string, data: T): Promise<void> {
+export async function saveSnapshot<T>(
+  userId: number,
+  name: string,
+  data: T,
+  etag?: string | null
+): Promise<void> {
   try {
     const db = await getDb();
     await db.put(
       'snapshots',
-      { data, savedAt: new Date().toISOString() },
+      { data, savedAt: new Date().toISOString(), etag: etag ?? null },
       `${userId}:${name}`,
     );
   } catch (err) {
