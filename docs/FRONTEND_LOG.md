@@ -1015,3 +1015,82 @@ npm run dev:frontend   # http://localhost:5173
 
 > The Asset Detail page gives staff and administrators a comprehensive view of any machine in the fleet—including specifications, current status, location, condition, full movement history, active rental terms, and maintenance work orders. Three offline-first actions (Move, Return, Send to Repair) write immediately to the local IndexedDB outbox with client UUIDs and calibrated timestamps, showing clear "Pending sync" or server "Sync Rejected" feedback banners with a discard option. Staff are strictly barred from seeing any rental rates or monetary amounts, while administrators have full access to agreed rates and standard rate cards.
 
+
+---
+
+## F-S3 — Admin Dashboard (Fleet Status Breakdown, Overdue Returns, Low-Stock Inventory & Outbox Monitor)
+
+**Date:** 2026-11-06  
+**Status:** ✅ Complete
+
+---
+
+### What Was Built
+
+| File | Purpose |
+|---|---|
+| `frontend/src/data/dashboardSource.ts` | Operational intelligence aggregation module: calculates fleet status counts (Available, Rented, Under Repair, Total), detects overdue rental returns based on expected return dates, filters low-stock materials, and provides offline fallback using IndexedDB snapshots. |
+| `frontend/src/pages/admin/AdminHomePage.tsx` | Rebuilt Operations Director Dashboard featuring live/offline status indicator, 4 fleet status metric cards linking to equipment filters, real-time offline sync & outbox monitor with server rejection banners and immediate discard buttons, overdue equipment returns table, low-stock inventory table, and quick operational action cards. |
+| `frontend/src/mocks/equipmentMock.ts` | Enhanced `MockEquipment` interface with optional rental fields (`current_rental_id`, `current_customer_name`, `current_site_name`, `current_rental_expected_end`) matching server SQL view `v_equipment_current`. |
+| `frontend/src/__tests__/dashboardSource.test.ts` | Test suite (8 tests) verifying status counters aggregation, date-overdue logic, overdue returns extraction, low-stock filtering, outbox tracking with discard, and snapshot fallback. |
+
+---
+
+### Why — Key Design Decisions
+
+#### 1. Real-time Status Breakdown with One-Click Fleet Filtering
+**Decision:** The dashboard aggregates derived machine states from `loadEquipment()` into four distinct cards: Total Fleet, Available (in yard, ready for dispatch), Rented (deployed on client site), and Under Repair (workshop work order). Clicking any card navigates to `/admin/equipment`.  
+**Why:** Operations directors need immediate situational awareness of fleet availability at a glance without navigating through multiple pages or running manual queries.
+
+#### 2. Proactive Overdue Equipment Return Tracking
+**Decision:** Active rented assets whose `current_rental_expected_end` precedes current date are automatically flagged as overdue with the exact number of days overdue. Each row displays the asset code (linking to its detail page), equipment make/model, customer name, project site, and a direct "Check In" button.  
+**Why:** Equipment overstaying rental agreements directly compromises turnaround schedules and asset availability for upcoming reservations. Surfacing overdue units immediately allows administrators to follow up with clients or record returns.
+
+#### 3. Low-Stock Materials Alerting
+**Decision:** The materials ledger is evaluated against `current_stock <= reorder_level` or `is_low_stock`. Items at or below threshold are listed with SKU, category, stock on hand vs reorder level, and a link to `/admin/materials`.  
+**Why:** Heavy machinery operations depend on critical maintenance consumables (filters, hydraulic oil, lubricants). Preventing stock-outs avoids costly maintenance delays.
+
+#### 4. Real-time Outbox & Sync Monitor with Immediate Discard
+**Decision:** Built directly into the dashboard using `useOutbox(userId)`:
+- When staff actions are rejected by the server, an alert banner displays the exact server error reason with an inline **Discard** button that removes the event from IndexedDB via `discardEvent(id)`.
+- When pending actions exist, an amber status banner shows queued operations with a manual "Sync Now" button.
+- When all events are synced, a clean green confirmation displays.  
+**Why:** Gives administrators total visibility into field sync activity, ensuring rejected offline actions are never silently forgotten.
+
+#### 5. Offline Snapshot Resilience
+**Decision:** The entire dashboard aggregates its metrics from cached IndexedDB snapshots (`equipment-list` and `materials-list`) when offline, displaying an offline snapshot indicator with cached timestamp.  
+**Why:** Executive dashboard visibility remains uninterrupted even during network dropouts or field inspections in remote areas.
+
+---
+
+### How to Test F-S3
+
+**1. Automated tests**
+```bash
+npm run test:frontend
+# 79/79 tests pass across 8 test suites (including 8 in dashboardSource.test.ts)
+npm run build:frontend
+# tsc && vite build passes with 0 errors
+```
+
+**2. Manual testing checklist**
+```bash
+npm run dev:frontend   # http://localhost:5173
+```
+
+| Role | Test Step | Expected Result |
+|---|---|---|
+| Admin | Log in as admin (`admin@spaceexspace.com`) | Lands on `/admin`. Dashboard renders welcome greeting, live sync status badge, and 4 status metric cards (Total, Available, Rented, Under Repair). |
+| Admin | Click "Available" card | Navigates to `/admin/equipment` with fleet list ready. |
+| Admin | Inspect Overdue Returns section | Overdue items (e.g. `CRN-50-001`) are listed with red due date and days overdue tag. Clicking "Check In" or asset code navigates to `/admin/equipment/CRN-50-001`. |
+| Admin | Inspect Low-Stock Materials section | Items below reorder level (e.g. `OIL-15W40-DRUM`) are displayed with current stock vs reorder level. |
+| Admin | Inspect Outbox Monitor | If no events, displays "✓ Outbox Synchronized". If rejected events exist, shows red banner with server reason and "Discard" button that clears it immediately. |
+| Admin | Toggle DevTools network to Offline | Status switches to "○ Offline Mode (Cached Snapshot)". Dashboard continues rendering metrics from local IndexedDB snapshot. |
+| Staff | Log in as staff (`staff@spaceexspace.com`) | Staff landing remains restricted to operational staff home (`/staff`); cannot access admin dashboard. |
+
+---
+
+### 30-Second Explanation
+
+> The Admin Dashboard provides operations directors with real-time operational intelligence across four key pillars: high-level equipment fleet status counts, proactive alerting for overdue rental returns with days-overdue tracking, inventory warnings for materials at or below reorder levels, and a live offline sync monitor showing queued actions or server-rejected events with one-click discard. All metrics compute seamlessly whether connected to the live server or running offline from IndexedDB snapshots.
+

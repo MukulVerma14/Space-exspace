@@ -25,6 +25,10 @@ export interface MockEquipment {
   current_location_name: string | null;
   current_location_kind: string | null;
   active: boolean;
+  current_rental_id?: number | null;
+  current_customer_name?: string | null;
+  current_site_name?: string | null;
+  current_rental_expected_end?: string | null;
 }
 
 export const MOCK_EQUIPMENT: MockEquipment[] = [
@@ -40,6 +44,10 @@ export const MOCK_EQUIPMENT: MockEquipment[] = [
     current_location_name: 'King Salman Port Terminal Site',
     current_location_kind: 'client_site',
     active: true,
+    current_rental_id: 10,
+    current_customer_name: 'Aramco Site Services',
+    current_site_name: 'King Salman Port Terminal Site',
+    current_rental_expected_end: '2026-10-15', // Overdue
   },
   {
     id: 2,
@@ -79,6 +87,10 @@ export const MOCK_EQUIPMENT: MockEquipment[] = [
     current_location_name: 'Jubail Industrial City Site A',
     current_location_kind: 'client_site',
     active: true,
+    current_rental_id: 12,
+    current_customer_name: 'SABIC Petrochemicals',
+    current_site_name: 'Jubail Industrial City Site A',
+    current_rental_expected_end: '2026-12-31', // Active, not overdue
   },
   {
     id: 5,
@@ -105,6 +117,10 @@ export const MOCK_EQUIPMENT: MockEquipment[] = [
     current_location_name: 'Ras Tanura Refinery Expansion',
     current_location_kind: 'client_site',
     active: true,
+    current_rental_id: 15,
+    current_customer_name: 'Petro Rabigh Operations',
+    current_site_name: 'Ras Tanura Refinery Expansion',
+    current_rental_expected_end: '2026-10-28', // Overdue
   },
   {
     id: 7,
@@ -131,6 +147,10 @@ export const MOCK_EQUIPMENT: MockEquipment[] = [
     current_location_name: 'King Salman Port Terminal Site',
     current_location_kind: 'client_site',
     active: true,
+    current_rental_id: 16,
+    current_customer_name: 'Aramco Site Services',
+    current_site_name: 'King Salman Port Terminal Site',
+    current_rental_expected_end: '2026-12-15',
   },
   {
     id: 9,
