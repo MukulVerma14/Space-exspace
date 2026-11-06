@@ -11,6 +11,9 @@
  *   First checks the local IndexedDB snapshot (instant response, offline-resilient),
  *   then queries GET /api/equipment/:asset_code when online to fetch latest live
  *   status and rich details (location history, active rental, open maintenance).
+ *
+ * Locations (F-S2):
+ *   Cached locations list for Move, Return, and Repair action pickers.
  */
 
 import { api, ApiRequestError } from '../api/client';
@@ -94,6 +97,22 @@ export interface ResolveEquipmentResult {
   error?: string | null;
 }
 
+export interface AppLocation {
+  id: number;
+  name: string;
+  kind: 'yard' | 'client_site' | 'workshop' | string;
+  party_id?: number | null;
+}
+
+export const DEFAULT_LOCATIONS: AppLocation[] = [
+  { id: 1, name: 'Dammam Central Yard', kind: 'yard' },
+  { id: 2, name: 'Jubail Industrial Yard', kind: 'yard' },
+  { id: 3, name: 'Central Maintenance Workshop', kind: 'workshop' },
+  { id: 4, name: 'King Salman Port Terminal Site', kind: 'client_site' },
+  { id: 5, name: 'Neom Logistics Hub Site', kind: 'client_site' },
+  { id: 6, name: 'Ras Al-Khair Maritime Yard', kind: 'yard' },
+];
+
 interface EquipmentPageResponse {
   items?: MockEquipment[];
   data?: MockEquipment[];
@@ -109,6 +128,7 @@ interface EquipmentPageResponse {
 }
 
 const SNAPSHOT_NAME = 'equipment-list';
+const LOCATIONS_SNAPSHOT = 'locations-list';
 const PAGE_SIZE = 100; // backend maximum
 const MAX_PAGES = 200; // safety guard: 20,000 items
 
@@ -239,4 +259,42 @@ export async function resolveEquipmentByCode(
       error: err instanceof Error ? err.message : `Failed to resolve asset '${clean}'.`,
     };
   }
+}
+
+/**
+ * Loads locations from GET /api/sync/snapshot or local snapshot cache,
+ * falling back to DEFAULT_LOCATIONS if none found.
+ */
+export async function fetchLocations(userId?: number): Promise<AppLocation[]> {
+  const isOnline = typeof navigator === 'undefined' ? true : navigator.onLine;
+  if (isOnline) {
+    try {
+      const snapRes = await api.get<{ locations?: AppLocation[] }>('/api/sync/snapshot');
+      if (Array.isArray(snapRes.locations) && snapRes.locations.length > 0) {
+        if (userId != null) {
+          try {
+            await saveSnapshot(userId, LOCATIONS_SNAPSHOT, snapRes.locations);
+          } catch {
+            // ignore snapshot write error in node/tests
+          }
+        }
+        return snapRes.locations;
+      }
+    } catch {
+      // offline or error, fallback to cache
+    }
+  }
+
+  if (userId != null) {
+    try {
+      const cached = await loadSnapshot<AppLocation[]>(userId, LOCATIONS_SNAPSHOT);
+      if (cached && Array.isArray(cached.data) && cached.data.length > 0) {
+        return cached.data;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return DEFAULT_LOCATIONS;
 }

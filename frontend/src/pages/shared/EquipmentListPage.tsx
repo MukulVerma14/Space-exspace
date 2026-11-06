@@ -22,7 +22,7 @@
  */
 
 import { useState, useMemo, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useDebounce } from '../../hooks/useDebounce';
 import { useAuth } from '../../context/AuthContext';
 import { loadEquipment, DataSource } from '../../data/equipmentSource';
@@ -100,6 +100,8 @@ export default function EquipmentListPage() {
       return matchesSearch && matchesStatus;
     });
   }, [debouncedSearch, statusFilter, items]);
+
+  const currentRole = user?.role || 'staff';
 
   return (
     <div className="animate-fade-up">
@@ -227,7 +229,7 @@ export default function EquipmentListPage() {
           }}
         >
           {filtered.map((eq) => (
-            <EquipmentCard key={eq.id} equipment={eq} />
+            <EquipmentCard key={eq.id} equipment={eq} role={currentRole} />
           ))}
         </div>
       )}
@@ -300,7 +302,9 @@ function StatusSummaryBar({
 
 // ─── Equipment Card ───────────────────────────────────────────────────────────
 
-function EquipmentCard({ equipment: eq }: { equipment: MockEquipment }) {
+function EquipmentCard({ equipment: eq, role }: { equipment: MockEquipment; role: string }) {
+  const navigate = useNavigate();
+
   const statusBadgeClass: Record<EquipmentStatus, string> = {
     available:   'badge-available',
     rented:      'badge-rented',
@@ -318,6 +322,15 @@ function EquipmentCard({ equipment: eq }: { equipment: MockEquipment }) {
   return (
     <article
       className="card"
+      tabIndex={0}
+      role="button"
+      onClick={() => navigate(`/${role}/equipment/${encodeURIComponent(eq.asset_code)}`)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          navigate(`/${role}/equipment/${encodeURIComponent(eq.asset_code)}`);
+        }
+      }}
       style={{
         display: 'flex',
         flexDirection: 'column',

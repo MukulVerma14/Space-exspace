@@ -15,7 +15,9 @@ import { getCalibratedNowIso } from './clock';
 export const OUTBOX_CHANGED_EVENT = 'sx-outbox-changed';
 
 function notify(): void {
-  window.dispatchEvent(new Event(OUTBOX_CHANGED_EVENT));
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+    window.dispatchEvent(new Event(OUTBOX_CHANGED_EVENT));
+  }
 }
 
 /**

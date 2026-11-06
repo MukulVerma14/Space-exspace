@@ -29,6 +29,7 @@ import AdminHomePage from '../pages/admin/AdminHomePage';
 import StaffHomePage from '../pages/staff/StaffHomePage';
 import PlaceholderPage from '../pages/PlaceholderPage';
 import EquipmentListPage from '../pages/shared/EquipmentListPage';
+import EquipmentDetailPage from '../pages/shared/EquipmentDetailPage';
 import MaterialsPage from '../pages/shared/MaterialsPage';
 import InvoicesPage from '../pages/admin/InvoicesPage';
 import ScanPage from '../pages/shared/ScanPage';
@@ -67,7 +68,7 @@ const router = createBrowserRouter([
           { path: '/admin',                         element: <AdminHomePage /> },
           { path: '/admin/scan',                    element: <ScanPage /> },
           { path: '/admin/equipment',               element: <EquipmentListPage /> },
-          { path: '/admin/equipment/:asset_code',   element: <PlaceholderPage title="Equipment Detail" /> },
+          { path: '/admin/equipment/:asset_code',   element: <EquipmentDetailPage /> },
           { path: '/admin/rentals',                 element: <PlaceholderPage title="Rentals" /> },
           { path: '/admin/materials',               element: <MaterialsPage /> },
           { path: '/admin/invoices',                element: <InvoicesPage /> },
@@ -86,7 +87,7 @@ const router = createBrowserRouter([
           { path: '/staff',                         element: <StaffHomePage /> },
           { path: '/staff/scan',                    element: <ScanPage /> },
           { path: '/staff/equipment',               element: <EquipmentListPage /> },
-          { path: '/staff/equipment/:asset_code',   element: <PlaceholderPage title="Equipment Detail" /> },
+          { path: '/staff/equipment/:asset_code',   element: <EquipmentDetailPage /> },
           { path: '/staff/rentals',                 element: <PlaceholderPage title="Rentals" /> },
           { path: '/staff/materials',               element: <MaterialsPage /> },
         ],

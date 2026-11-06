@@ -932,3 +932,86 @@ npm run dev:frontend   # http://localhost:5173
 ### 30-Second Explanation
 
 > Both staff and administrators now have access to a dedicated QR Scan page featuring real-time camera scanning limited to 5 frames per second with a 3-second repeat cooldown to conserve device battery and avoid duplicate reads. The resolution pipeline checks the local IndexedDB snapshot first for instant offline identification, then queries the live server when online. An accessible manual asset-code entry form is always available for damaged or unreadable physical tags, and the camera stream cleanly shuts down the moment a user leaves the page.
+
+---
+
+## F-S2 — Asset Detail Page, Offline-First Outbox Actions (Move, Return, Repair), Status Sync & Role-Gated Rates
+
+**Date:** 2026-11-06  
+**Status:** ✅ Complete
+
+---
+
+### What Was Built
+
+| File | Purpose |
+|---|---|
+| `frontend/src/pages/shared/EquipmentDetailPage.tsx` | Dedicated asset detail page for `/admin/equipment/:asset_code` and `/staff/equipment/:asset_code`. Displays type, model, serial no, capacity, current status, location, condition, last moved info, movement history log, active rental terms, open maintenance tickets, and admin rate cards. Embeds action modals for Move, Return, and Send to Repair with outbox status banners. |
+| `frontend/src/data/equipmentSource.ts` | Added `AppLocation`, `DEFAULT_LOCATIONS`, and `fetchLocations` (queries `GET /api/sync/snapshot`, caches in IndexedDB snapshot, and falls back to resilient defaults when offline). |
+| `frontend/src/offline/outbox.ts` | Guarded `notify()` against `undefined window` in headless/node environments to ensure seamless test execution. |
+| `frontend/src/pages/shared/EquipmentListPage.tsx` | Enhanced equipment cards with keyboard and click navigation to `/${role}/equipment/${encodeURIComponent(eq.asset_code)}`. |
+| `frontend/src/router/AppRouter.tsx` | Wired `<EquipmentDetailPage />` into `/admin/equipment/:asset_code` and `/staff/equipment/:asset_code` routes. |
+| `frontend/src/__tests__/equipmentDetail.test.ts` | Comprehensive unit tests (14 tests) verifying role gating on rates (zero rates/currency for staff, rates visible for admin), offline fallback, outbox event generation (move, return, send_to_repair), server rejection handling, and action preconditions. |
+
+---
+
+### Why — Key Design Decisions
+
+#### 1. Zero Rates for Staff Everywhere
+**Decision:** Staff users never see rate cards, agreed rates (`applied_rate`), discount notes, or maintenance repair costs anywhere on the detail page or subcomponents. For admin users, standard rate cards (`standard_rates`) and active rental commercial terms are clearly rendered.  
+**Why:** Commercial rate sensitivity is paramount. Yard technicians and field staff manage physical movements and machine condition, but must never see negotiated rates or rate cards. The frontend strictly guards rendering in addition to the backend's `sanitizeFinancials()` serializer.
+
+#### 2. Offline-First Outbox Actions via `enqueueEvent`
+**Decision:** All three fleet operations—**Move**, **Return**, and **Send to Repair**—write directly to the client IndexedDB outbox via `enqueueEvent`. Every action receives a client UUID and calibrated timestamp (`occurredAt`). If online, `runSync` is triggered in the background; if offline, the action remains safe in the outbox until connectivity is restored.  
+**Why:** Heavy machinery relocation and yard check-ins often occur in dead zones without cell signal. Field staff cannot wait for network connectivity to record physical movements.
+
+#### 3. Action Preconditions and Domain Rules
+**Decision:**
+- **Move:** Always permitted across any active asset (relocations between yards, sites, and workshops).
+- **Return:** Permitted only when `status === 'rented'`. Disabled with explanatory text for available or in-repair equipment.
+- **Send to Repair:** Permitted only when `status !== 'rented'` and `status !== 'under_repair'`. Rented assets must be returned to a yard before opening maintenance, and machines already under repair cannot have duplicate open orders.  
+**Why:** Prevents invalid fleet states and aligns with backend validation rules in `syncController.ts`.
+
+#### 4. Real-time Outbox Status Banners
+**Decision:** The asset detail page listens to `useOutbox(userId)` and filters events for this specific asset code:
+- **Pending sync:** Shows an amber warning banner with the action type and timestamp, along with a manual "Sync Now" button if online.
+- **Rejected sync:** Shows a red alert banner displaying the exact server rejection reason (e.g., *"Equipment is actively rented. Return it to a yard first"*), with an immediate "Discard" button calling `discardEvent(id)` to review and clear the error.  
+**Why:** Provides transparent visibility into asynchronous background sync progress without requiring the user to open the global outbox dropdown.
+
+#### 5. Resilient Location Pickers (`fetchLocations`)
+**Decision:** Location pickers load locations from `GET /api/sync/snapshot`, cache them in local snapshot storage (`locations-list`), and fall back to hardcoded `DEFAULT_LOCATIONS` if no cache exists offline.  
+**Why:** Action dialogs require valid destination `location_id`s. Even when starting the app completely offline, technicians can immediately select valid yards and workshops.
+
+---
+
+### How to Test F-S2
+
+**1. Automated tests**
+```bash
+npm run test:frontend
+# 71/71 tests pass across 7 test suites (including 14 in equipmentDetail.test.ts)
+npm run build:frontend
+# tsc && vite build passes with 0 errors
+```
+
+**2. Manual testing checklist**
+```bash
+npm run dev:frontend   # http://localhost:5173
+```
+
+| Role | Test Step | Expected Result |
+|---|---|---|
+| Admin | Log in as admin (`admin@spaceexspace.com`) → Navigate to `/admin/equipment` → Click "CRN-50-001" | Navigates to `/admin/equipment/CRN-50-001`. Header displays status "Rented", condition "Good", serial number, capacity, and current location. |
+| Admin | Inspect Active Rental & Rates sections | Active Rental shows Aramco customer details, site name, dates, agreed rate (`2,800.00 SAR / day`), and discount note. Standard Rate Cards table displays day/week/month rates with VAT status. |
+| Staff | Log in as staff (`staff@spaceexspace.com`) → Navigate to `/staff/equipment/CRN-50-001` | Navigates to `/staff/equipment/CRN-50-001`. Machine specs and rental customer/dates are shown, but **NO rates or currency figures appear anywhere**. Standard rate card table is absent. |
+| Staff | Click "📍 Move" | Opens Move Modal. Select "Jubail Industrial Yard", enter note "Relocated for project", submit. Modal closes. If offline, amber "Pending Sync" banner appears immediately. |
+| Staff | Click "🔄 Return" on rented machine | Opens Return Modal. Select receiving yard, condition ("Fair"), enter note, submit. Action enqueues to outbox. |
+| Staff | Check "🔧 Send to Repair" on rented machine | Button is disabled with explanatory note: *"This machine is currently rented. To open maintenance, it must first be returned."* |
+| Staff | Simulate Rejected Event (or outbox rejection) | Outbox displays red alert banner: *"Sync Rejected: [server reason]"* with a "Discard" button that clears it on click. |
+
+---
+
+### 30-Second Explanation
+
+> The Asset Detail page gives staff and administrators a comprehensive view of any machine in the fleet—including specifications, current status, location, condition, full movement history, active rental terms, and maintenance work orders. Three offline-first actions (Move, Return, Send to Repair) write immediately to the local IndexedDB outbox with client UUIDs and calibrated timestamps, showing clear "Pending sync" or server "Sync Rejected" feedback banners with a discard option. Staff are strictly barred from seeing any rental rates or monetary amounts, while administrators have full access to agreed rates and standard rate cards.
+
