@@ -26,12 +26,20 @@ export default function StaffHomePage() {
         gap: 'var(--space-4)',
       }}>
         <QuickCard
+          id="staff-nav-scan"
+          to="/staff/scan"
+          icon="📷"
+          title="Scan QR Code"
+          desc="Camera scan & manual lookup"
+          color="var(--color-primary)"
+        />
+        <QuickCard
           id="staff-nav-equipment"
           to="/staff/equipment"
           icon="🏗️"
-          title="Equipment"
-          desc="Scan QR, move & return assets"
-          color="var(--color-primary)"
+          title="Equipment Fleet"
+          desc="Search, move & return assets"
+          color="var(--color-info)"
         />
         <QuickCard
           id="staff-nav-rentals"

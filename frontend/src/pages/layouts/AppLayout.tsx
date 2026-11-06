@@ -83,6 +83,7 @@ export default function AppLayout() {
             paddingLeft: 'var(--space-4)',
           }}
         >
+          <NavItem to={`${homeHref}/scan`} label="Scan QR" />
           <NavItem to={`${homeHref}/equipment`} label="Equipment" />
           {user.role === 'admin' && (
             <>

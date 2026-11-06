@@ -22,6 +22,7 @@
  */
 
 import { useState, useMemo, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { useDebounce } from '../../hooks/useDebounce';
 import { useAuth } from '../../context/AuthContext';
 import { loadEquipment, DataSource } from '../../data/equipmentSource';
@@ -103,15 +104,26 @@ export default function EquipmentListPage() {
   return (
     <div className="animate-fade-up">
       {/* ── Page Header ── */}
-      <div style={{ marginBottom: 'var(--space-6)' }}>
-        <h1 style={{ fontSize: 'var(--text-2xl)', fontWeight: 700, marginBottom: 'var(--space-1)' }}>
-          Equipment Fleet
-        </h1>
-        <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }}>
-          {loading
-            ? 'Loading fleet…'
-            : `${filtered.length} of ${items.length} assets`}
-        </p>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 'var(--space-4)', flexWrap: 'wrap', marginBottom: 'var(--space-6)' }}>
+        <div>
+          <h1 style={{ fontSize: 'var(--text-2xl)', fontWeight: 700, marginBottom: 'var(--space-1)' }}>
+            Equipment Fleet
+          </h1>
+          <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }}>
+            {loading
+              ? 'Loading fleet…'
+              : `${filtered.length} of ${items.length} assets`}
+          </p>
+        </div>
+        <Link
+          id="btn-scan-qr"
+          to={user?.role === 'admin' ? '/admin/scan' : '/staff/scan'}
+          className="btn btn-primary"
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }}
+        >
+          <span>📷</span>
+          <span>Scan QR Code</span>
+        </Link>
       </div>
 
       {/* ── Offline / no-data notices ── */}

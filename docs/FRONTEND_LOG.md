@@ -851,3 +851,84 @@ npm run dev:frontend   # http://localhost:5173
 ### 30-Second Explanation
 
 > Administrators can now record issued customer billing invoices with dynamic line items linked either to catalog items or custom equipment rental services. Subtotals, VAT, and totals reconcile with the server, which strictly guards against duplicate numbers and mismatched rental IDs. Any unpaid invoice (received or issued) can be marked as paid through a verified settlement action with audit logging. Staff remain barred from accessing commercial invoices, and file references remain secure plain text.
+
+---
+
+## F-S1 — Scan Page (Staff & Admin), Camera QR Scanning, 5 FPS Limit, 3-Second Cooldown, Snapshot-First Resolution
+
+**Date:** 2026-11-06  
+**Status:** ✅ Complete
+
+---
+
+### What Was Built
+
+| File | Purpose |
+|---|---|
+| `frontend/src/components/CameraScanner.tsx` | Camera QR scanner powered by `html5-qrcode`: configured for 5 fps frame rate, 3-second (3000ms) repeat-read cooldown, unmount stream cleanup, and permission-denied / unsupported browser detection with friendly retry controls. |
+| `frontend/src/pages/shared/ScanPage.tsx` | Shared Scan page for staff and admin: renders camera viewfinder with targeting crosshairs, instant resolution banner, ALWAYS-available manual asset-code entry fallback, and resolved asset preview card with status badges, location, condition, and data source indicator (`● Live Server` vs `○ Offline Snapshot`). |
+| `frontend/src/data/equipmentSource.ts` | Added `EquipmentDetail`, `ResolveEquipmentResult`, `getSnapshotEquipmentByCode`, `fetchLiveEquipmentByCode`, and `resolveEquipmentByCode` (resolves from local IndexedDB snapshot first, then queries `GET /api/equipment/:asset_code`). |
+| `frontend/src/router/AppRouter.tsx` | Added `/admin/scan` and `/staff/scan` routes for both roles, plus preliminary `/equipment/:asset_code` route placeholders for F-S2. |
+| `frontend/src/pages/layouts/AppLayout.tsx` | Added "Scan QR" NavItem in main navigation for both Admin and Staff. |
+| `frontend/src/pages/staff/StaffHomePage.tsx` | Added prominent "Scan QR Code" quick-nav card to staff dashboard. |
+| `frontend/src/pages/admin/AdminHomePage.tsx` | Added "Scan QR Code" quick-nav card to admin dashboard. |
+| `frontend/src/pages/shared/EquipmentListPage.tsx` | Added "📷 Scan QR Code" button in the header toolbar linking to the scan page. |
+| `frontend/src/__tests__/equipmentSource.test.ts` | Added unit tests verifying `getSnapshotEquipmentByCode`, `fetchLiveEquipmentByCode`, and `resolveEquipmentByCode` offline/live fallback. |
+| `frontend/src/__tests__/scan.test.ts` | Test suite verifying the 3-second debounce rule, 5 fps rate limit, camera cleanup on unmount, permission denied handling, and validation against QR codes printed from `/api/labels/sheet`. |
+
+---
+
+### Why — Key Design Decisions
+
+#### 1. 5 FPS Frame Rate & 3-Second Repeat Read Cooldown
+**Decision:** The camera scanner is strictly throttled to 5 frames per second (`fps: 5`), and identical decoded strings are ignored for 3 seconds (`3000ms`).  
+**Why:** Continuous 30 or 60 fps camera decoding causes thermal throttling and rapid battery drain on field mobile devices. Throttling to 5 fps consumes negligible CPU while scanning instantly. The 3-second cooldown prevents accidental duplicate resolutions when a technician aims the camera at an equipment tag.
+
+#### 2. Snapshot-First Resolution (`resolveEquipmentByCode`)
+**Decision:** When an asset code is scanned or entered, the client queries the local IndexedDB snapshot store (`equipment-list`) first. If offline, the snapshot resolution is returned immediately. If online, the server's `GET /api/equipment/:asset_code` is fetched to retrieve live status, location history, active rental details, and open maintenance tickets.  
+**Why:** Technicians frequently operate in concrete yards or remote desert sites with spotty network coverage. Checking the local snapshot first guarantees instant asset identification even when offline.
+
+#### 3. ALWAYS-Available Manual Asset-Code Fallback
+**Decision:** A manual entry form with uppercase auto-normalization is prominently rendered alongside the camera view, and remains fully functional even if camera access is denied, unsupported, or paused.  
+**Why:** Physical QR tags in heavy industrial yards can get scratched, painted over, or coated in grease and sand. Technicians must never be blocked by optical tag failures.
+
+#### 4. Clean Camera Stream Lifecycle Management
+**Decision:** The camera stream is bound to React's component lifecycle. When the technician navigates away from the scan page, the stream is explicitly stopped (`scanner.stop()`) and DOM elements are cleared. A manual "Pause Camera" toggle is also provided.  
+**Why:** Prevents hardware camera indicators from staying on, preserves mobile battery life, and eliminates memory leaks.
+
+#### 5. Compatibility with Plain-Text QR Labels (`/api/labels/sheet`)
+**Decision:** The scanner accepts the exact plain-text `asset_code` payload generated by the backend label sheet service (e.g. `CRN-50-001`, `GEN-250-001`) as specified in ADR 014.  
+**Why:** Keeps QR payloads short and high-entropy, allowing High error correction (`H`, 30% recovery) on compact printable tags.
+
+---
+
+### How to Test F-S1
+
+**1. Automated tests**
+```bash
+npm run test:frontend
+# 57/57 tests pass across 6 test suites (including 11 in scan.test.ts)
+npm run build:frontend
+# tsc && vite build succeeds with exit code 0
+```
+
+**2. Manual testing checklist**
+```bash
+npm run dev:frontend   # http://localhost:5173
+```
+
+| Role | Test Step | Expected Result |
+|---|---|---|
+| Staff | Log in as staff (`staff@spaceexspace.com`) → Click "Scan QR" in top nav or home card | Navigates to `/staff/scan`. Viewfinder initializes with 5 fps overlay and targeting crosshairs. |
+| Staff | Deny camera permission in browser popup | Viewfinder switches to clear alert: *"Camera permission was denied... Please use manual entry below."* |
+| Staff | Type "CRN-50-001" in the manual asset-code input → Click "Look Up" | Resolves asset `CRN-50-001`. Card displays "Tadano GR-500EX", status badge, location, and data source indicator. |
+| Staff | Toggle network to Offline in DevTools → Enter "GEN-250-001" | Resolves instantly from local IndexedDB snapshot; displays `○ Offline Snapshot` tag and cached timestamp. |
+| Staff | Click "Scan Another Asset" | Resets the view and returns to the scanner/manual form. |
+| Admin | Log in as admin (`admin@spaceexspace.com`) → Equipment page | Top header displays "📷 Scan QR Code" button. Clicking it navigates to `/admin/scan`. |
+| Admin | Enter non-existent code "INVALID-999" | Displays clear error banner: *"Equipment with asset code 'INVALID-999' was not found on the server."* |
+
+---
+
+### 30-Second Explanation
+
+> Both staff and administrators now have access to a dedicated QR Scan page featuring real-time camera scanning limited to 5 frames per second with a 3-second repeat cooldown to conserve device battery and avoid duplicate reads. The resolution pipeline checks the local IndexedDB snapshot first for instant offline identification, then queries the live server when online. An accessible manual asset-code entry form is always available for damaged or unreadable physical tags, and the camera stream cleanly shuts down the moment a user leaves the page.

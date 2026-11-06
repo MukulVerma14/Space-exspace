@@ -28,12 +28,20 @@ export default function AdminHomePage() {
         gap: 'var(--space-4)',
       }}>
         <QuickCard
+          id="nav-scan"
+          to="/admin/scan"
+          icon="📷"
+          title="Scan QR Code"
+          desc="Camera scan & asset lookup"
+          color="var(--color-primary)"
+        />
+        <QuickCard
           id="nav-equipment"
           to="/admin/equipment"
           icon="🏗️"
           title="Equipment Fleet"
-          desc="Search, filter & scan assets"
-          color="var(--color-primary)"
+          desc="Search, filter & manage assets"
+          color="var(--color-info)"
         />
         <QuickCard
           id="nav-rentals"
@@ -57,7 +65,7 @@ export default function AdminHomePage() {
           icon="🧾"
           title="Invoices"
           desc="Supplier &amp; customer records"
-          color="var(--color-info)"
+          color="var(--color-primary-dim)"
         />
       </div>
     </div>
