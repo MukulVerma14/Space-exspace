@@ -159,6 +159,10 @@ The audit evaluated six specific dimensions:
 | **F-I2** | Invoices Page: Received/Issued Tabs, Detail Drawer, Badges | **DONE** | Paginated table, status filtering, detail drawer with line items, plain-text file references. |
 | **F-I3** | New Supplier Invoice Modal with Dynamic Lines | **DONE** | Dynamic line items, debounced catalog search, server authority decimal validation, duplicate 409 alerts. |
 | **F-I4** | New Customer Invoice Modal & Mark Paid Settlement Action | **DONE** | Customer invoice recording, rental ID linkage, settlement date modal, audit logging. |
+| **F-S1** | Scan Page: Camera QR scanner (5 fps, 3s debounce), snapshot-first lookup, manual fallback | **DONE** | html5-qrcode scanning, snapshot-first resolution, fallback input, test QR verification. |
+| **F-S2** | Asset Detail: Specs, location, condition, history, offline actions, role-gated rates | **DONE** | Offline outbox actions (Move, Return, Repair) with pending/rejection alerts, zero rates for staff. |
+| **F-S3** | Admin Dashboard: Fleet counts, overdue returns, low stock, outbox monitor | **DONE** | Operational counters, overdue days calculation, outbox sync monitor with inline discard. |
+| **F-S4** | Cold Start Snapshot, Searchable Party Picker, Editable VAT (decimal.js), ADR 018 | **DONE** | GET /api/sync/snapshot with ETag 304 caching, searchable party dropdown, decimal.js VAT preview, dead code wiped. |
 
 ---
 
@@ -225,3 +229,24 @@ Following the strict rule to remediate **ONLY** items ranked as **Blocker**:
    - Update `frontend/src/__tests__/invoicesSource.test.ts` to assert against the contract `{ message, data }`.
    - Run `npm run test:frontend` and `npm run build:frontend` to verify complete resolution.
    - Record fix in `docs/LEARNING_LOG.md`.
+
+---
+
+## 7. Post-Review Hardening & Remediation Summary (Steps F-S1 through F-S4)
+
+Following the remediation of Blocker 1, all Major and Minor findings identified in this review were systematically addressed and verified across steps F-S1 through F-S4:
+
+1. **Major 1 — Sequential Fleet Pagination Bursts**:
+   - **Resolved in F-S4**: Replaced looping `GET /api/equipment?page=N` with conditional `GET /api/sync/snapshot` passing `If-None-Match: <etag>`. Server returns `304 Not Modified` when unchanged, eliminating burst requests.
+2. **Major 2 — JWT in `localStorage`**:
+   - **Addressed in F-S4 & ADR 018**: Formally documented prototype `localStorage` trade-offs (JSX text escaping, zero `dangerouslySetInnerHTML`) and codified the production migration to same-origin `httpOnly, Secure, SameSite=Strict` cookies via Caddy with double-submit CSRF protection in [ADR 018](decisions/018-prototype-jwt-localstorage-and-production-cookie-strategy.md).
+3. **Major 3 — Fine-Grained 403 Forbidden Messages**:
+   - **Resolved in F-S4**: Updated `api/client.ts` to attach descriptive permission messages to 403 errors, and added a dedicated Access Denied alert card in `RequireAuth.tsx`.
+4. **Minor 1 — Continuous Camera Scanner Debounce**:
+   - **Resolved in F-S1**: Implemented 5 frames/second decoding rate limit and a 3-second deduplication lock window in `ScanPage.tsx`.
+5. **Minor 2 — Clock Offset Reset on Logout**:
+   - **Resolved in F-S4**: `AuthContext.tsx` invokes `resetClockOffset()` on user sign-out and 401 session expiry.
+6. **Minor 3 & 4 — Dead Mock Data & Unused Dev Hooks**:
+   - **Resolved in F-S4**: Deleted `frontend/src/mocks/equipmentMock.ts` (`MOCK_EQUIPMENT`), relocated interfaces to `equipmentSource.ts`, and removed `simulateNext401` from `syncClient.ts`.
+7. **Minor 5 — Admin-Only Searchable Party Selector**:
+   - **Resolved in F-S4**: Added `GET /api/parties?role=` with unit test suite `parties.test.ts` and `SearchablePartyPicker.tsx`.

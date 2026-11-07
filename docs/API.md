@@ -1276,3 +1276,51 @@ Generates a printable A4 HTML sheet or JSON feed of equipment QR labels.
   "message": "One or more requested asset codes do not exist: UNKNOWN-999"
 }
 ```
+
+---
+
+### 30. `GET /api/parties`
+List active business parties (customers and suppliers) for selection in invoice and billing forms.
+
+- **Access Level**: Admin Only (`role: 'admin'`)
+- **Query Parameters**:
+  - `role` (optional, string): Filter parties by business role. Allowed values: `'customer'`, `'supplier'`.
+  - `search` (optional, string): Case-insensitive text search matching name, contact person, email, or phone.
+- **Headers**:
+  - `Authorization: Bearer <admin_token>`
+
+#### Response
+- **Status**: `200 OK`
+- **Content-Type**: `application/json`
+- **Body**:
+```json
+{
+  "count": 3,
+  "data": [
+    {
+      "id": 1,
+      "name": "Saudi Aramco",
+      "contact_person": "Tariq Al-Ghamdi",
+      "phone": "+966 13 872 0115",
+      "email": "procurement@aramco.com",
+      "vat_no": "300000000000003",
+      "address": "Dhahran Complex, Eastern Province",
+      "notes": "Key corporate account",
+      "is_customer": true,
+      "is_supplier": false,
+      "active": true,
+      "created_at": "2026-10-25T08:00:00.000Z"
+    }
+  ]
+}
+```
+
+#### Error Responses
+- **400 Bad Request** (Invalid role filter):
+```json
+{
+  "error": "Invalid role filter. Allowed values: 'customer', 'supplier'"
+}
+```
+- **401 Unauthorized**: Missing or expired JWT token.
+- **403 Forbidden**: Caller is not an Administrator (e.g. staff token).
