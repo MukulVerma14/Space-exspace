@@ -29,6 +29,12 @@ app.set('trust proxy', 1);
 // Security headers
 app.use(helmet());
 
+// Permissions-Policy: Allow camera access for self origin (QR scanning)
+app.use((_req, res, next) => {
+  res.setHeader('Permissions-Policy', 'camera=(self)');
+  next();
+});
+
 // Cross-Origin Resource Sharing
 app.use(
   cors({

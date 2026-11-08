@@ -1186,3 +1186,89 @@ npm run dev:frontend   # http://localhost:5173
 ### 30-Second Explanation
 
 > Step F-S4 completes the frontend transition to production-grade architecture: equipment cold starts now use `GET /api/sync/snapshot` with HTTP 304 conditional ETag validation to eliminate redundant data transfer; hardcoded party pickers are replaced with an admin-only searchable customer/supplier selector; VAT rates are editable and previewed with `decimal.js` arbitrary precision; clock offsets reset on logout; 403 errors surface human-readable explanations; and all leftover mock equipment files and test helpers are cleaned up.
+
+---
+
+## F-S5 — Camera Diagnostics, Permissions Policy, Fallback getUserMedia Harness & Repair Kind Resolution
+
+**Date:** 2026-11-08  
+**Status:** ✅ Complete
+
+---
+
+### What Was Built / Changed
+
+| File | Purpose |
+|---|---|
+| `frontend/src/utils/cameraErrors.ts` | Diagnostic parser `parseCameraError()` mapping `NotAllowedError`, `NotFoundError`, `NotReadableError`, `OverconstrainedError`, `SecurityError`, and `AbortError` to `{ name, message, hint }`. |
+| `frontend/vite.config.ts` | Configured `Permissions-Policy: camera=(self)` headers on dev and preview servers. |
+| `backend/src/app.ts` | Configured `Permissions-Policy: camera=(self)` middleware for Express API. |
+| `frontend/src/components/CameraScanner.tsx` | Replaced `display: none` container with persistent absolute layout to prevent 0x0 size errors; relaxed constraints to `{ facingMode: { ideal: 'environment' } }` with fallback to `cameras[0].id`; added React 18 StrictMode double-mount lifecycle guard with `stopAndClear()`; added diagnostic error UI card with plain hints and test page link. |
+| `frontend/src/pages/shared/ScanPage.tsx` | Added dev-only `?debug=1` panel displaying `isSecureContext`, `userAgent`, enumerated hardware cameras, and shortcut link to the test page. |
+| `frontend/src/pages/shared/CameraTestPage.tsx` | Created minimal standalone test page using raw `navigator.mediaDevices.getUserMedia` (`<video playsInline muted autoPlay>`), camera toggle, and live track diagnostics. |
+| `frontend/src/router/AppRouter.tsx` | Mounted `CameraTestPage` at `/admin/camera-test` and `/staff/camera-test`. |
+| `frontend/src/pages/shared/EquipmentDetailPage.tsx` | Fixed "Send to Repair" modal to provide explicit `<select id="repair-kind">` choosing between `'repair'` (default) and `'modification'`, and reset modal state on open/close cycles. |
+| `backend/src/controllers/equipmentController.ts` | Fixed `maintId` scope in `sendToRepair` and returned `{ id, kind, description }` under `maintenance` in the response payload. |
+| `backend/src/__tests__/equipment.test.ts` | Added integration tests verifying `kind: 'repair'` and `kind: 'modification'` writes to the maintenance table. |
+| `frontend/src/__tests__/equipmentDetail.test.ts` | Added frontend unit tests verifying outbox event enqueue captures `kind: 'modification'`. |
+| `frontend/src/__tests__/scan.test.ts` | Added unit tests verifying `parseCameraError()` mappings for all WebRTC exception types and generic strings. |
+| `docs/CAMERA_DEBUG.md` | Comprehensive investigation and diagnosis report documenting the findings, root causes, permissions policy, and solutions. |
+
+---
+
+### Why — Key Design Decisions
+
+#### 1. Zero-Dimension Container Fix
+**Decision:** Instead of hiding `<div id="sx-qr-reader">` with `display: none` during initializing state, the container is styled with `position: absolute; inset: 0; visibility: status === 'scanning' ? 'visible' : 'hidden'`.  
+**Why:** `html5-qrcode` requires non-zero bounding box dimensions during `start()` to calculate aspect ratios and canvas coordinates. `display: none` evaluates to `0x0`, causing geometry calculation exceptions.
+
+#### 2. Ideal FacingMode with Device ID Fallback
+**Decision:** Changed constraint from `{ facingMode: 'environment' }` to `{ facingMode: { ideal: 'environment' } }`, catching overconstrained errors and automatically falling back to `cameras[0].id` from `Html5Qrcode.getCameras()`.  
+**Why:** Single-camera laptops and desktops lack an environmental (rear) camera. Exact constraints throw `OverconstrainedError`, while ideal constraints allow the browser to use whatever camera is available.
+
+#### 3. StrictMode Double-Mount Guard
+**Decision:** Implemented `mountIdRef` and `stopAndClear()` that safely awaits `scannerRef.current.stop()` before allowing re-initialization.  
+**Why:** React 18 in dev mode unmounts and remounts components instantly. Because stopping hardware media tracks is asynchronous, the second mount collided with the un-stopped first mount, throwing `NotReadableError` (device busy).
+
+#### 4. Plain-Language Diagnostic Feedback & ?debug=1 Inspection
+**Decision:** Technicians now see clear, actionable hints (e.g. check browser URL lock icon, close competing apps like Teams) rather than silent stalls or cryptic DOMException strings. The `?debug=1` parameter provides an immediate HUD showing secure context status and hardware enumeration.
+
+#### 5. Raw getUserMedia Test Harness
+**Decision:** Built `/admin/camera-test` and `/staff/camera-test` using raw `<video>` and `getUserMedia`.  
+**Why:** Provides an unambiguous test bed to prove whether camera failure is an OS/browser permission issue or a third-party scanning library bug.
+
+#### 6. Maintenance Record Kind Disambiguation
+**Decision:** Added repair kind selector (`repair` vs `modification`) in `EquipmentDetailPage.tsx`, reset state on open/close, and verified database persistence.  
+**Why:** Field technicians can now properly classify vehicle/equipment modifications separately from corrective maintenance overhauls, preventing data corruption in maintenance logs.
+
+---
+
+### How to Test F-S5
+
+**1. Automated tests**
+```bash
+npm run test:backend
+# 163/163 passed (including repair/modification kind assertions)
+npm run test:frontend
+# 89/89 passed (including 7 new parseCameraError tests and modification outbox tests)
+npm run build:frontend
+# tsc && vite build passes with 0 errors
+```
+
+**2. Manual testing checklist**
+```bash
+npm run dev:frontend   # http://localhost:5173
+```
+
+| Role | Test Step | Expected Result |
+|---|---|---|
+| Admin / Staff | Visit `/admin/scan?debug=1` or `/staff/scan?debug=1` | Diagnostic HUD shows Secure Context: true, User Agent string, and enumerated cameras. |
+| Admin / Staff | Deny camera permission in browser | Card shows `NotAllowedError` with hint: *"Camera permission was denied. Please allow camera access in your browser settings (URL bar lock icon) and refresh."* |
+| Admin / Staff | Visit `/admin/camera-test` or `/staff/camera-test` | Minimal test page renders raw video feed with live track diagnostics (label, width, height, aspect ratio). |
+| Admin / Staff | Navigate to `/admin/equipment/CRN-50-001` → Click "Send to Repair" | Modal defaults to "Repair / Overhaul". Changing to "Engineering Modification" and submitting logs `kind: 'modification'` in outbox/backend. |
+
+---
+
+### 30-Second Explanation
+
+> Step F-S5 makes the equipment QR scanner rock-solid across field hardware: it eliminates zero-dimension container bugs and StrictMode double-mount collisions; falls back gracefully from ideal rear camera constraints to any available camera on single-lens workstations; provides plain-English troubleshooting advice for all camera errors; introduces an isolated raw `getUserMedia` test harness; and fixes the maintenance workflow so work orders correctly distinguish repairs from engineering modifications.

@@ -300,8 +300,29 @@ describe('Equipment Detail & Fleet Operations (F-S2)', () => {
       expect(event.type).toBe('send_to_repair');
       expect(event.assetCode).toBe('EXC-20-001');
       expect(event.payload.kind).toBe('repair');
-      expect(event.payload.description).toBe('Hydraulic main boom arm cylinder seal leak');
+            expect(event.payload.description).toBe('Hydraulic main boom arm cylinder seal leak');
       expect(event.payload.workshop_location_id).toBe(3);
+      expect(event.status).toBe('pending');
+    });
+
+    it('enqueues a "send_to_repair" action with kind "modification" when user chooses modification', async () => {
+      const event = await enqueueEvent({
+        userId: 1,
+        type: 'send_to_repair',
+        assetCode: 'CRN-50-001',
+        payload: {
+          kind: 'modification',
+          description: 'Boom extension and counterweight engineering upgrade',
+          workshop_location_id: 1,
+          note: 'Approved upgrade order',
+        },
+      });
+
+      expect(event.id).toBeDefined();
+      expect(event.type).toBe('send_to_repair');
+      expect(event.assetCode).toBe('CRN-50-001');
+      expect(event.payload.kind).toBe('modification');
+      expect(event.payload.description).toBe('Boom extension and counterweight engineering upgrade');
       expect(event.status).toBe('pending');
     });
 

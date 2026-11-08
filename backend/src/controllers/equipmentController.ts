@@ -496,6 +496,7 @@ export async function sendToRepair(req: Request, res: Response) {
   // Cost security: Only admin can record a non-zero maintenance cost initially
   const actualCost = req.user!.role === 'admin' ? (cost ?? 0.0) : 0.0;
 
+  let maintId: number | null = null;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -507,7 +508,7 @@ export async function sendToRepair(req: Request, res: Response) {
        RETURNING id`,
       [equipment.id, kind, description, actualCost, req.user!.id]
     );
-    const maintId = maintInsertRes.rows[0].id;
+    maintId = maintInsertRes.rows[0].id;
 
     // 2. Update equipment condition
     await client.query(
@@ -540,6 +541,11 @@ export async function sendToRepair(req: Request, res: Response) {
 
   return res.status(200).json({
     message: `Equipment ${equipment.asset_code} successfully sent to maintenance`,
+    maintenance: {
+      id: maintId,
+      kind,
+      description,
+    },
     equipment: sanitized,
   });
 }

@@ -267,6 +267,7 @@ export default function EquipmentDetailPage() {
       }
 
       setShowRepairModal(false);
+      setRepairKind('repair');
       setRepairDescription('');
       setRepairNote('');
     } catch (err) {
@@ -563,6 +564,10 @@ export default function EquipmentDetailPage() {
                   : 'Open maintenance ticket for this asset'
               }
               onClick={() => {
+                setRepairKind('repair');
+                setRepairDescription('');
+                setRepairWorkshopId('');
+                setRepairNote('');
                 setShowRepairModal(true);
                 setActionError(null);
               }}

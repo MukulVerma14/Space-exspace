@@ -1,26 +1,4 @@
-/**
- * Application Router
- *
- * Route structure:
- *
- *   /login               → LoginPage (public)
- *   /                    → redirect to /admin or /staff based on role
- *   /admin/*             → RequireAuth(role=admin) → AppLayout → admin pages
- *   /staff/*             → RequireAuth(role=staff) → AppLayout → staff pages
- *   *                    → 404
- *
- * WHY SEPARATE /admin AND /staff PREFIXES:
- * It makes the role boundary crystal clear in the URL — an admin URL shared
- * with a staff user will be caught by RequireAuth and redirect them to their
- * own home, not show a blank or broken page.
- *
- * WHY NOT HIDE SECTIONS IN THE UI BY ROLE:
- * The router redirects navigation, but what data appears on each page is
- * determined entirely by the server response. The UI renders what arrives.
- * We never conditionally render data based on role — only navigation.
- */
-
-import { createBrowserRouter, Navigate, RouterProvider } from 'react-router-dom';
+import { createBrowserRouter, RouterProvider, Navigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { RequireAuth } from './RequireAuth';
 import AppLayout from '../pages/layouts/AppLayout';
@@ -33,6 +11,7 @@ import EquipmentDetailPage from '../pages/shared/EquipmentDetailPage';
 import MaterialsPage from '../pages/shared/MaterialsPage';
 import InvoicesPage from '../pages/admin/InvoicesPage';
 import ScanPage from '../pages/shared/ScanPage';
+import CameraTestPage from '../pages/shared/CameraTestPage';
 
 // ─── Root redirect ────────────────────────────────────────────────────────────
 
@@ -67,6 +46,7 @@ const router = createBrowserRouter([
         children: [
           { path: '/admin',                         element: <AdminHomePage /> },
           { path: '/admin/scan',                    element: <ScanPage /> },
+          { path: '/admin/camera-test',             element: <CameraTestPage /> },
           { path: '/admin/equipment',               element: <EquipmentListPage /> },
           { path: '/admin/equipment/:asset_code',   element: <EquipmentDetailPage /> },
           { path: '/admin/rentals',                 element: <PlaceholderPage title="Rentals" /> },
@@ -86,6 +66,7 @@ const router = createBrowserRouter([
         children: [
           { path: '/staff',                         element: <StaffHomePage /> },
           { path: '/staff/scan',                    element: <ScanPage /> },
+          { path: '/staff/camera-test',             element: <CameraTestPage /> },
           { path: '/staff/equipment',               element: <EquipmentListPage /> },
           { path: '/staff/equipment/:asset_code',   element: <EquipmentDetailPage /> },
           { path: '/staff/rentals',                 element: <PlaceholderPage title="Rentals" /> },

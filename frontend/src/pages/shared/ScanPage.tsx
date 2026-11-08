@@ -1,13 +1,14 @@
 /**
  * ScanPage — QR Code scanning & manual asset lookup.
  *
- * SPECIFICATION (F-S1):
+ * SPECIFICATION (F-S1 & F-S5):
  * - Staff and Admin accessible: /admin/scan and /staff/scan
  * - Camera QR scanning (html5-qrcode):
  *   - Limited to ~5 frames per second
  *   - Ignores repeat scans of the same code for 3 seconds
  *   - Halts camera stream immediately on unmount or pause
  *   - Gracefully handles permission denial & unsupported browsers
+ *   - Diagnostic error mapping and dev-only ?debug=1 inspection panel
  * - ALWAYS offers a manual asset-code entry fallback
  * - Resolution strategy:
  *   - Checks local IndexedDB snapshot first (instant response, offline resilient)
@@ -16,7 +17,8 @@
  */
 
 import { useState, FormEvent, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Html5Qrcode, CameraDevice } from 'html5-qrcode';
 import { useAuth } from '../../context/AuthContext';
 import { CameraScanner } from '../../components/CameraScanner';
 import {
@@ -41,6 +43,9 @@ const STATUS_CLASSES: Record<EquipmentStatus, string> = {
 export default function ScanPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
+  const isDebug = searchParams.get('debug') === '1';
 
   const [cameraActive, setCameraActive] = useState<boolean>(true);
   const [manualCode, setManualCode] = useState<string>('');
@@ -49,8 +54,13 @@ export default function ScanPage() {
   const [resolvedResult, setResolvedResult] = useState<ResolveEquipmentResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // Debug panel state
+  const [debugCameras, setDebugCameras] = useState<CameraDevice[]>([]);
+  const [debugCameraError, setDebugCameraError] = useState<string | null>(null);
+
   const role = user?.role || 'staff';
   const userId = user?.id || 1;
+  const testPageUrl = `/${role}/camera-test`;
 
   // Cleanup on unmount: deactivate camera
   useEffect(() => {
@@ -58,6 +68,19 @@ export default function ScanPage() {
       setCameraActive(false);
     };
   }, []);
+
+  // Fetch debug camera devices if ?debug=1
+  useEffect(() => {
+    if (isDebug) {
+      Html5Qrcode.getCameras()
+        .then((devices) => {
+          setDebugCameras(devices || []);
+        })
+        .catch((err: unknown) => {
+          setDebugCameraError(err instanceof Error ? err.message : String(err));
+        });
+    }
+  }, [isDebug]);
 
   const handleResolveCode = useCallback(async (rawCode: string) => {
     const code = rawCode.trim();
@@ -108,6 +131,8 @@ export default function ScanPage() {
   }
 
   const equipment: EquipmentDetail | null = resolvedResult?.equipment ?? null;
+  const isSecureContext = typeof window !== 'undefined' ? Boolean(window.isSecureContext) : false;
+  const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown';
 
   return (
     <div className="animate-fade-up" style={{ maxWidth: 640, margin: '0 auto', paddingBottom: 'var(--space-8)' }}>
@@ -120,6 +145,63 @@ export default function ScanPage() {
           Scan physical asset tag or enter asset code manually (offline-first)
         </p>
       </div>
+
+      {/* Dev-only ?debug=1 Diagnostic Panel */}
+      {isDebug && (
+        <div
+          data-testid="camera-debug-panel"
+          className="card"
+          style={{
+            marginBottom: 'var(--space-6)',
+            padding: 'var(--space-4)',
+            background: 'var(--color-surface-2)',
+            border: '1px solid var(--color-warning)',
+            borderRadius: 'var(--radius-md)',
+            fontSize: 'var(--text-xs)',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--space-2)' }}>
+            <span style={{ fontWeight: 700, color: 'var(--color-warning)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              🛠 Camera Diagnostic Panel (?debug=1)
+            </span>
+            <a href={testPageUrl} style={{ color: 'var(--color-primary)', textDecoration: 'underline' }}>
+              Raw getUserMedia Test →
+            </a>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '150px 1fr', rowGap: 'var(--space-2)', columnGap: 'var(--space-2)' }}>
+            <span style={{ color: 'var(--color-text-muted)' }}>window.isSecureContext:</span>
+            <span style={{ fontWeight: 600, color: isSecureContext ? 'var(--color-success)' : 'var(--color-danger)' }}>
+              {isSecureContext ? '✓ true (Secure Origin)' : '✗ false (Plain HTTP blocks camera)'}
+            </span>
+
+            <span style={{ color: 'var(--color-text-muted)' }}>User Agent:</span>
+            <span style={{ fontFamily: 'var(--font-mono)', wordBreak: 'break-all', fontSize: '0.7rem' }}>
+              {userAgent}
+            </span>
+
+            <span style={{ color: 'var(--color-text-muted)' }}>Cameras Enumerated:</span>
+            <span>
+              {debugCameraError ? (
+                <span style={{ color: 'var(--color-danger)' }}>Error: {debugCameraError}</span>
+              ) : debugCameras.length === 0 ? (
+                <em>No cameras detected (or permission not yet granted)</em>
+              ) : (
+                <ul style={{ margin: 0, paddingLeft: 'var(--space-4)' }}>
+                  {debugCameras.map((cam, idx) => (
+                    <li key={cam.id || idx}>
+                      <strong>{cam.label || `Camera #${idx + 1}`}</strong>
+                      <span style={{ color: 'var(--color-text-muted)', display: 'block', fontSize: '0.7rem' }}>
+                        ID: {cam.id ? `${cam.id.slice(0, 20)}…` : 'default'}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Main Resolution Container */}
       {!equipment && (
@@ -140,6 +222,7 @@ export default function ScanPage() {
                 handleResolveCode(scannedCode);
               }}
               onToggleActive={(active) => setCameraActive(active)}
+              testPageUrl={testPageUrl}
             />
           </div>
 
@@ -148,62 +231,47 @@ export default function ScanPage() {
             <div
               className="card"
               style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 'var(--space-3)',
                 padding: 'var(--space-4)',
-                background: 'var(--color-surface-2)',
+                textAlign: 'center',
+                background: 'var(--color-surface)',
                 border: '1px solid var(--color-border)',
-                borderRadius: 'var(--radius-md)',
               }}
             >
-              <div className="spinner spinner-md" />
-              <div style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text)' }}>
-                Resolving asset <strong>{resolvedCode}</strong> (snapshot first, then live API)…
-              </div>
+              <div className="spinner spinner-md" style={{ margin: '0 auto var(--space-2)' }} />
+              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>
+                Resolving asset code: <strong style={{ color: 'var(--color-text)' }}>{resolvedCode}</strong>…
+              </p>
             </div>
           )}
 
-          {/* Error / Not Found Banner */}
+          {/* Resolution Error Banner */}
           {errorMessage && !resolving && (
             <div
+              className="card"
               role="alert"
               style={{
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 'var(--space-2)',
                 padding: 'var(--space-4)',
-                background: 'var(--color-danger-dim)',
+                background: 'rgba(239, 68, 68, 0.1)',
                 border: '1px solid var(--color-danger)',
                 borderRadius: 'var(--radius-md)',
-                color: 'var(--color-danger)',
-                fontSize: 'var(--text-sm)',
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: 'var(--space-3)',
               }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', fontWeight: 600 }}>
-                <span>⚠️</span>
-                <span>Asset Lookup Failed</span>
+              <span style={{ fontSize: '1.25rem' }}>⚠️</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600, color: 'var(--color-danger)', fontSize: 'var(--text-sm)' }}>
+                  Lookup Failed
+                </div>
+                <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text)', marginTop: '2px' }}>
+                  {errorMessage}
+                </div>
               </div>
-              <div>{errorMessage}</div>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => setErrorMessage(null)}
-                style={{
-                  alignSelf: 'flex-start',
-                  fontSize: 'var(--text-xs)',
-                  color: 'var(--color-danger)',
-                  padding: '2px 8px',
-                  marginTop: 'var(--space-1)',
-                }}
-              >
-                Dismiss
-              </button>
             </div>
           )}
 
-          {/* ALWAYS OFFERED: Manual Asset-Code Entry Fallback */}
+          {/* Manual Entry Fallback Form */}
           <div
             className="card"
             style={{
@@ -213,39 +281,31 @@ export default function ScanPage() {
               borderRadius: 'var(--radius-lg)',
             }}
           >
-            <div style={{ marginBottom: 'var(--space-3)' }}>
-              <div style={{ fontWeight: 600, fontSize: 'var(--text-sm)', marginBottom: 'var(--space-1)' }}>
-                Manual Asset Code Entry
-              </div>
-              <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)' }}>
-                Always available for field equipment without readable labels or camera access.
-              </div>
-            </div>
+            <h2 style={{ fontSize: 'var(--text-base)', fontWeight: 600, marginBottom: 'var(--space-2)' }}>
+              ⌨ Manual Asset Code Entry
+            </h2>
+            <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-xs)', marginBottom: 'var(--space-4)' }}>
+              If camera scanning is unavailable or the QR label is damaged, type the asset code printed on the machine tag.
+            </p>
 
             <form onSubmit={handleManualSubmit} style={{ display: 'flex', gap: 'var(--space-2)' }}>
               <input
-                id="manual-asset-code-input"
+                id="manual-asset-input"
                 type="text"
                 className="input"
-                placeholder="e.g. CRN-50-001, GEN-250-001"
+                placeholder="e.g. CRN-50-001 or GEN-250-001"
                 value={manualCode}
                 onChange={(e) => setManualCode(e.target.value)}
                 disabled={resolving}
-                style={{
-                  flex: 1,
-                  fontFamily: 'var(--font-mono)',
-                  textTransform: 'uppercase',
-                }}
-                autoComplete="off"
-                autoCapitalize="characters"
+                style={{ flex: 1, fontFamily: 'var(--font-mono)', textTransform: 'uppercase' }}
               />
               <button
-                id="manual-asset-code-btn"
+                id="manual-asset-submit"
                 type="submit"
                 className="btn btn-primary"
                 disabled={resolving || !manualCode.trim()}
               >
-                {resolving ? 'Looking up…' : 'Look Up'}
+                Look Up Asset
               </button>
             </form>
           </div>
@@ -254,47 +314,66 @@ export default function ScanPage() {
 
       {/* Resolved Equipment Card View */}
       {equipment && (
-        <div className="card animate-fade-up" style={{ padding: 'var(--space-6)', background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-lg)' }}>
-          {/* Header Row: Asset Code & Source Badge */}
-          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
+        <div
+          className="card animate-fade-up"
+          style={{
+            padding: 'var(--space-6)',
+            background: 'var(--color-surface)',
+            border: '2px solid var(--color-primary)',
+            borderRadius: 'var(--radius-lg)',
+            boxShadow: 'var(--shadow-lg)',
+          }}
+        >
+          {/* Card Header */}
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'flex-start',
+              justifyContent: 'space-between',
+              marginBottom: 'var(--space-4)',
+              borderBottom: '1px solid var(--color-border-subtle)',
+              paddingBottom: 'var(--space-4)',
+            }}
+          >
             <div>
-              <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                Asset Code
-              </div>
-              <div style={{ fontSize: 'var(--text-2xl)', fontWeight: 800, fontFamily: 'var(--font-mono)', color: 'var(--color-text)' }}>
+              <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>
+                Asset Tag Detected
+              </span>
+              <h2
+                style={{
+                  fontSize: 'var(--text-2xl)',
+                  fontWeight: 700,
+                  fontFamily: 'var(--font-mono)',
+                  color: 'var(--color-primary)',
+                  letterSpacing: '0.05em',
+                }}
+              >
                 {equipment.asset_code}
-              </div>
+              </h2>
             </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 'var(--space-1)' }}>
+            <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
               <span className={`status-badge ${STATUS_CLASSES[equipment.status] || ''}`}>
                 {STATUS_LABELS[equipment.status] || equipment.status}
               </span>
               <span
-                style={{
-                  fontSize: 'var(--text-xs)',
-                  padding: '2px 8px',
-                  borderRadius: 'var(--radius-full)',
-                  fontWeight: 600,
-                  background: resolvedResult?.source === 'live' ? 'var(--color-success-dim)' : 'var(--color-warning-dim)',
-                  color: resolvedResult?.source === 'live' ? 'var(--color-success)' : 'var(--color-warning)',
-                }}
+                className={`badge ${
+                  resolvedResult?.source === 'snapshot' ? 'badge-warning' : 'badge-success'
+                }`}
+                style={{ fontSize: 'var(--text-xs)' }}
               >
-                {resolvedResult?.source === 'live' ? '● Live Server' : '○ Offline Snapshot'}
+                {resolvedResult?.source === 'snapshot' ? '⚡ Local Snapshot' : '● Live API'}
               </span>
             </div>
           </div>
 
-          {/* Metadata Grid */}
+          {/* Machine Details Grid */}
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
-              gap: 'var(--space-3)',
-              background: 'var(--color-surface-2)',
-              padding: 'var(--space-4)',
-              borderRadius: 'var(--radius-md)',
-              marginBottom: 'var(--space-4)',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+              gap: 'var(--space-4)',
+              marginBottom: 'var(--space-6)',
             }}
           >
             <div>

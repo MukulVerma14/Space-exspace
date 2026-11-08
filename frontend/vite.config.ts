@@ -101,6 +101,9 @@ export default defineConfig({
 
   server: {
     port: 5173,
+    headers: {
+      'Permissions-Policy': 'camera=(self)',
+    },
     proxy: {
       '/api': {
         target: 'http://localhost:3000',
@@ -110,6 +113,13 @@ export default defineConfig({
         target: 'http://localhost:3000',
         changeOrigin: true,
       },
+    },
+  },
+
+  preview: {
+    port: 4173,
+    headers: {
+      'Permissions-Policy': 'camera=(self)',
     },
   },
 });

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { resolveEquipmentByCode } from '../data/equipmentSource';
+import { parseCameraError } from '../utils/cameraErrors';
 import * as dbModule from '../offline/db';
 import { api } from '../api/client';
 
@@ -213,21 +214,68 @@ describe('Scan System & QR Protocol (F-S1)', () => {
     });
   });
 
-  describe('Camera Failure & Fallback Handling', () => {
-    it('identifies NotAllowedError as permission denied', () => {
-      const error = new Error('NotAllowedError: Permission denied');
-      const isPermissionDenied =
-        error.message.includes('NotAllowedError') ||
-        error.message.includes('Permission denied');
-      expect(isPermissionDenied).toBe(true);
-    });
-
+  describe('Camera Failure & Fallback Handling (F-S5 Diagnostics)', () => {
     it('identifies unsupported browser environment when getUserMedia is missing', () => {
       const mockNavigator = {};
       const isSupported =
         !!(mockNavigator as any).mediaDevices &&
         typeof (mockNavigator as any).mediaDevices.getUserMedia === 'function';
       expect(isSupported).toBe(false);
+    });
+
+    describe('parseCameraError mapping', () => {
+      it('correctly diagnoses NotAllowedError with permission hint', () => {
+        const err = new DOMException('Permission denied', 'NotAllowedError');
+        const diag = parseCameraError(err);
+        expect(diag.name).toBe('NotAllowedError');
+        expect(diag.message).toBe('Permission denied');
+        expect(diag.hint).toMatch(/permission was denied/i);
+      });
+
+      it('correctly diagnoses NotFoundError with hardware missing hint', () => {
+        const err = new DOMException('Requested device not found', 'NotFoundError');
+        const diag = parseCameraError(err);
+        expect(diag.name).toBe('NotFoundError');
+        expect(diag.message).toBe('Requested device not found');
+        expect(diag.hint).toMatch(/no physical camera was detected/i);
+      });
+
+      it('correctly diagnoses NotReadableError with in-use hint', () => {
+        const err = new DOMException('Could not start video source', 'NotReadableError');
+        const diag = parseCameraError(err);
+        expect(diag.name).toBe('NotReadableError');
+        expect(diag.message).toBe('Could not start video source');
+        expect(diag.hint).toMatch(/in use by another application/i);
+      });
+
+      it('correctly diagnoses OverconstrainedError with constraint hint', () => {
+        const err = new DOMException('Constraints could not be satisfied', 'OverconstrainedError');
+        const diag = parseCameraError(err);
+        expect(diag.name).toBe('OverconstrainedError');
+        expect(diag.message).toBe('Constraints could not be satisfied');
+        expect(diag.hint).toMatch(/constraints.*could not be satisfied/i);
+      });
+
+      it('correctly diagnoses SecurityError with secure context hint', () => {
+        const err = new DOMException('Only secure origins are allowed', 'SecurityError');
+        const diag = parseCameraError(err);
+        expect(diag.name).toBe('SecurityError');
+        expect(diag.message).toBe('Only secure origins are allowed');
+        expect(diag.hint).toMatch(/secure context.*permissions-policy/i);
+      });
+
+      it('correctly parses plain string error messages', () => {
+        const diag = parseCameraError('NotAllowedError: Permission denied by system');
+        expect(diag.name).toBe('NotAllowedError');
+        expect(diag.hint).toMatch(/permission was denied/i);
+      });
+
+      it('handles unknown / generic errors with fallback hint', () => {
+        const diag = parseCameraError(new Error('Hardware bus failure'));
+        expect(diag.name).toBe('Error');
+        expect(diag.message).toBe('Hardware bus failure');
+        expect(diag.hint).toMatch(/could not access camera/i);
+      });
     });
   });
 });

@@ -332,9 +332,40 @@ describe('Equipment API & QR Actions Suite', () => {
         [res.body.equipment.id]
       );
       expect(maintCheck.rows.length).toBe(1);
+      expect(maintCheck.rows[0].kind).toBe('repair');
       expect(maintCheck.rows[0].description).toBe('Boom cylinder seal leaking hydraulic oil');
+      expect(res.body.maintenance.kind).toBe('repair');
       // For staff, cost must default to 0
       expect(Number(maintCheck.rows[0].cost)).toBe(0);
+    });
+
+    it('successfully sends equipment to modification when kind is explicitly modification', async () => {
+      // Pick another available equipment
+      const availableRes = await pool.query(
+        `SELECT asset_code FROM v_equipment_current WHERE status = 'available' LIMIT 1`
+      );
+      const assetCode = availableRes.rows[0].asset_code;
+
+      const res = await request(app)
+        .post(`/api/equipment/${assetCode}/repair`)
+        .set('Authorization', `Bearer ${staffToken}`)
+        .send({
+          kind: 'modification',
+          description: 'Structural boom reinforcement and load chart recertification',
+          note: 'Client engineering upgrade',
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.equipment.status).toBe('under_repair');
+      expect(res.body.maintenance.kind).toBe('modification');
+
+      const maintCheck = await pool.query(
+        `SELECT * FROM maintenance WHERE equipment_id = $1 AND closed_at IS NULL`,
+        [res.body.equipment.id]
+      );
+      expect(maintCheck.rows.length).toBe(1);
+      expect(maintCheck.rows[0].kind).toBe('modification');
+      expect(maintCheck.rows[0].description).toBe('Structural boom reinforcement and load chart recertification');
     });
   });
 });
