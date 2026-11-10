@@ -1,7 +1,7 @@
-# Camera Debugging, Diagnostics & Repair Workflow Report (F-S5)
+# Camera Debugging, Diagnostics & Repair Workflow Report (F-S5 & F-S6)
 
-**Date**: 2026-11-08  
-**Scope**: Camera QR scanner stability, permissions policy, runtime hardware failure diagnostics, raw `getUserMedia` test harness, and maintenance work order kind resolution.  
+**Date**: 2026-11-10  
+**Scope**: Camera QR scanner stability, permissions policy, runtime hardware failure diagnostics, raw `getUserMedia` test harness, html5-qrcode state transition deadlock resolution, and native jsQR scanner replacement.  
 **Author**: Antigravity Assistant  
 
 ---
@@ -15,12 +15,13 @@ During mobile and desktop operational testing of the Scan Page (`/admin/scan` an
    - On desktop workstations and laptops with only a front-facing webcam, the camera initialization failed immediately.
    - React 18 development mode (`StrictMode`) caused rapid double-mount collisions resulting in hardware locks (`NotReadableError`).
    - The scanner DOM element had `0x0` dimensions at the instant `Html5Qrcode.start()` was invoked, causing canvas rendering failures.
+   - **Critical html5-qrcode Deadlock (F-S6)**: On Android Chrome and laptop webcams, `html5-qrcode` threw `"Cannot transition to a new state, already under transition"` and caused the Retry button to hang indefinitely, even though the raw `getUserMedia` test page worked flawlessly.
 
 2. **Maintenance Record Creation Bug ("Send to Repair")**:
    - Dispatching equipment via "Send to Repair" in `EquipmentDetailPage.tsx` inadvertently produced a maintenance record with `kind = 'modification'` instead of `'repair'`.
    - The user had no interactive control to distinguish genuine maintenance overhauls/repairs from vehicle/equipment engineering modifications.
 
-This document details the root causes identified, architectural fixes implemented across frontend and backend services, the diagnostic inspection tools introduced (`?debug=1` panel and minimal fallback camera test page), and automated test coverage.
+This document details the root causes identified, architectural fixes implemented across frontend and backend services, the diagnostic inspection tools introduced (`?debug=1` panel and minimal fallback camera test page), the replacement of `html5-qrcode` with our native `getUserMedia` + `jsQR` engine (ADR 019), and automated test coverage.
 
 ---
 
@@ -56,14 +57,7 @@ This document details the root causes identified, architectural fixes implemente
 - **Fix**:
   - Implemented an incremental `mountIdRef` and `unmountedRef` guard in `CameraScanner.tsx`.
   - Implemented `stopAndClear()` which safely awaits `scannerRef.current.stop()` before allowing any subsequent `start()` sequence.
-  - Added full cleanup on unmount:
-    ```tsx
-    return () => {
-      unmountedRef.current = true;
-      mountIdRef.current++;
-      stopAndClear();
-    };
-    ```
+  - Added full cleanup on unmount.
 
 ### 2.4 Browser Security Context & Response Headers
 - **Requirement**: `navigator.mediaDevices.getUserMedia` requires a **Secure Context** (`window.isSecureContext === true`: `https://` or `http://localhost`). Additionally, modern browsers block camera access if prohibited by `Permissions-Policy`.
@@ -96,14 +90,15 @@ A dedicated diagnostic parser was created at [`frontend/src/utils/cameraErrors.t
 | `NotReadableError` | Hardware stream busy, locked, or OS driver crash. | *"Camera is already in use by another application (e.g. Teams, Zoom, or another tab). Close other apps and retry."* |
 | `OverconstrainedError` | Device does not meet ideal camera parameters. | *"The requested camera constraints could not be satisfied. Retrying with default camera..."* |
 | `SecurityError` | Insecure context (HTTP) or disallowed iframe origin. | *"Camera access requires a secure context (HTTPS or localhost) and Permissions-Policy permissions."* |
+| `WatchdogTimeoutError` | Camera stream started but delivered no video frames within 8 seconds. | *"The camera stream was established but delivered no video frames within 8 seconds. Please click Retry or use manual entry below."* |
 
-The UI displays an informative alert card showing the exact error name, message, troubleshooting hint, a "Retry Camera" button, and a link to the raw test page.
+The UI displays an informative alert card showing the exact error name, message, troubleshooting hint, a working "Retry Camera" button, and a link to the raw test page.
 
 ### 3.2 Dev-Only Inspection Panel (`?debug=1`)
 Appending `?debug=1` to the Scan page URL (`/admin/scan?debug=1` or `/staff/scan?debug=1`) mounts a real-time debugging HUD displaying:
 - `Secure Context (window.isSecureContext)`: `true` / `false`
 - `Browser User Agent`: Full string
-- `Available Cameras`: Array of enumerated hardware devices (`id`, `label`) from `Html5Qrcode.getCameras()`
+- `Available Cameras`: Array of enumerated hardware devices (`deviceId`, `label`) from native `navigator.mediaDevices.enumerateDevices()`
 - Fallback shortcut to `/admin/camera-test` or `/staff/camera-test`.
 
 ### 3.3 Raw `getUserMedia` Minimal Fallback Test Page
@@ -112,7 +107,7 @@ Created [`frontend/src/pages/shared/CameraTestPage.tsx`](file:///D:/IdeaProjects
 - Renders minimal `<video playsInline muted autoPlay>` without any third-party library wrappers.
 - Displays live track metrics: `track.label`, `readyState`, `aspectRatio`, `width`, `height`.
 - Allows toggling between Environment and User facing modes.
-- **Purpose**: Instantly distinguishes whether camera failure stems from OS/browser permissions vs `html5-qrcode` library setup.
+- **Purpose**: Instantly distinguishes whether camera failure stems from OS/browser permissions vs third-party scanning library wrappers.
 
 ---
 
@@ -142,7 +137,41 @@ In `frontend/src/pages/shared/EquipmentDetailPage.tsx`:
 
 ---
 
-## 5. Automated Test Suite Results
+## 5. Root Cause Analysis: html5-qrcode Deadlock & Native jsQR Replacement (F-S6)
+
+### 5.1 The html5-qrcode Deadlock Symptom
+During live testing on Android Chrome and laptop webcams:
+- The scanner frequently failed with unhandled exception:
+  `Cannot transition to a new state, already under transition`
+- Subsequent clicks on the "Retry" button hung indefinitely without starting the camera or updating UI status.
+- Crucially, on the exact same physical devices and browser sessions, the minimal test page using raw `navigator.mediaDevices.getUserMedia` worked instantly without error.
+
+### 5.2 Root Cause
+`html5-qrcode` implements a monolithic internal state machine that attempts to sequence WebRTC stream acquisition, canvas creation, and barcode decoding using private flags and un-cancelable promise chains. When React 18 mounts, unmounts, and remounts components (or when a user taps "Retry" while a startup attempt is still resolving), `html5-qrcode` attempts concurrent state transitions that trigger its internal invariant assertion (`Cannot transition to a new state, already under transition`). The library enters a permanent deadlock, refusing all subsequent `start()`, `stop()`, or `clear()` calls.
+
+### 5.3 Architectural Resolution (ADR 019)
+We completely uninstalled `html5-qrcode` and built our own native, robust scanner architecture:
+1. **Lightweight Engine (`ScannerEngine`)**:
+   - Explicit 4-state lifecycle machine: `idle`, `starting`, `running`, `stopping`.
+   - `start()` is fully idempotent.
+   - `sessionId` token guards every asynchronous boundary (`getUserMedia`, `loadedmetadata`, `play()`).
+   - If `retry()` or `stop()` is called while `getUserMedia` is resolving, the in-flight session is canceled and tracks are stopped immediately upon resolution.
+   - Pauses on `document.visibilityState === 'hidden'` and resumes on `visible`.
+2. **Decode Pipeline (`qrDecoder`)**:
+   - Direct `<video playsInline muted autoPlay>` element binding.
+   - `requestAnimationFrame` loop throttled to 5–8 fps (~140ms interval).
+   - Offscreen canvas dynamically downscaled to maximum 640px wide (`willReadFrequently: true`).
+   - Pure QR decoding with `jsQR` (~40KB, zero DOM dependencies).
+   - 3-second deduplication cooldown on identical codes.
+   - 50ms haptic vibration pulse (`navigator.vibrate(50)`) on successful recognition.
+3. **8-Second Watchdog Timer**:
+   - If the camera stream starts but no video frames arrive within 8 seconds, `WatchdogTimeoutError` is raised with a working Retry button.
+4. **Native Hardware Diagnostics**:
+   - Replaced `Html5Qrcode.getCameras()` with native `navigator.mediaDevices.enumerateDevices()`.
+
+---
+
+## 6. Automated Test Suite Results
 
 1. **Frontend Vitest Suites**:
    - `clock.test.ts` (5 passed)
@@ -150,11 +179,17 @@ In `frontend/src/pages/shared/EquipmentDetailPage.tsx`:
    - `equipmentSource.test.ts` (13 passed)
    - `invoicesSource.test.ts` (15 passed)
    - `dashboardSource.test.ts` (8 passed)
-   - `scan.test.ts` (17 passed) — includes `parseCameraError` diagnostics and 3-second debounce rules.
    - `equipmentDetail.test.ts` (15 passed) — includes repair vs modification outbox assertions.
    - `materialsSource.test.ts` (11 passed)
-   - **Total Frontend**: **8 suites, 89 passed, 0 failed**.
+   - `scan.test.ts` (27 passed):
+     - Pure `decodeFrame()` against real QR PNGs generated via `qrcode` and read via `pngjs`
+     - Scaled canvas dimension calculations
+     - `ScannerEngine` state machine tests: start twice (idempotent), stop while starting, retry while starting, unmount cleanup, and 8s watchdog timeout
+     - 3-second debounce cooldown
+     - `parseCameraError` diagnostics for all WebRTC errors
+   - **Total Frontend**: **8 suites, 99 passed, 0 failed**.
+   - **Client Build**: Clean Vite production build (bundle size dropped from 780 kB to 577 kB).
 
 2. **Backend Vitest Suites**:
    - Verified against live PostgreSQL 18 instance on port 5433.
-   - Includes maintenance dispatch with explicit repair/modification kind assertions.
+   - **Total Backend**: **11 suites, 163 passed, 0 failed**.

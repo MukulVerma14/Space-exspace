@@ -1,14 +1,15 @@
 /**
  * ScanPage — QR Code scanning & manual asset lookup.
  *
- * SPECIFICATION (F-S1 & F-S5):
+ * SPECIFICATION (F-S1, F-S5, F-S6):
  * - Staff and Admin accessible: /admin/scan and /staff/scan
- * - Camera QR scanning (html5-qrcode):
- *   - Limited to ~5 frames per second
+ * - Camera QR scanning (native getUserMedia + jsQR engine):
+ *   - Limited to ~5-8 frames per second (~140ms throttle)
  *   - Ignores repeat scans of the same code for 3 seconds
+ *   - Single guarded lifecycle state machine (idle, starting, running, stopping)
  *   - Halts camera stream immediately on unmount or pause
- *   - Gracefully handles permission denial & unsupported browsers
- *   - Diagnostic error mapping and dev-only ?debug=1 inspection panel
+ *   - Gracefully handles permission denial, timeout watchdog & unsupported browsers
+ *   - Diagnostic error mapping and dev-only ?debug=1 inspection panel via enumerateDevices()
  * - ALWAYS offers a manual asset-code entry fallback
  * - Resolution strategy:
  *   - Checks local IndexedDB snapshot first (instant response, offline resilient)
@@ -18,7 +19,6 @@
 
 import { useState, FormEvent, useEffect, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Html5Qrcode, CameraDevice } from 'html5-qrcode';
 import { useAuth } from '../../context/AuthContext';
 import { CameraScanner } from '../../components/CameraScanner';
 import {
@@ -40,6 +40,11 @@ const STATUS_CLASSES: Record<EquipmentStatus, string> = {
   under_repair: 'status-badge-repair',
 };
 
+interface DebugDeviceInfo {
+  deviceId: string;
+  label: string;
+}
+
 export default function ScanPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -55,7 +60,7 @@ export default function ScanPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Debug panel state
-  const [debugCameras, setDebugCameras] = useState<CameraDevice[]>([]);
+  const [debugCameras, setDebugCameras] = useState<DebugDeviceInfo[]>([]);
   const [debugCameraError, setDebugCameraError] = useState<string | null>(null);
 
   const role = user?.role || 'staff';
@@ -69,16 +74,27 @@ export default function ScanPage() {
     };
   }, []);
 
-  // Fetch debug camera devices if ?debug=1
+  // Fetch debug camera devices via native navigator.mediaDevices.enumerateDevices() if ?debug=1
   useEffect(() => {
     if (isDebug) {
-      Html5Qrcode.getCameras()
-        .then((devices) => {
-          setDebugCameras(devices || []);
-        })
-        .catch((err: unknown) => {
-          setDebugCameraError(err instanceof Error ? err.message : String(err));
-        });
+      if (typeof navigator !== 'undefined' && navigator.mediaDevices?.enumerateDevices) {
+        navigator.mediaDevices
+          .enumerateDevices()
+          .then((devices) => {
+            const videoInputs = devices
+              .filter((d) => d.kind === 'videoinput')
+              .map((d, idx) => ({
+                deviceId: d.deviceId || `default-${idx}`,
+                label: d.label || `Camera #${idx + 1}`,
+              }));
+            setDebugCameras(videoInputs);
+          })
+          .catch((err: unknown) => {
+            setDebugCameraError(err instanceof Error ? err.message : String(err));
+          });
+      } else {
+        setDebugCameraError('navigator.mediaDevices.enumerateDevices is not available');
+      }
     }
   }, [isDebug]);
 
@@ -98,14 +114,11 @@ export default function ScanPage() {
       setResolvedResult(res);
 
       if (res.source === 'not_found' || !res.equipment) {
-        setErrorMessage(
-          res.error || `Equipment with asset code '${code}' was not found.`
-        );
+        setErrorMessage(`Asset '${code}' was not found in local snapshot or on server.`);
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setErrorMessage(msg);
-      setResolvedResult(null);
+      const message = err instanceof Error ? err.message : 'Failed to resolve asset code';
+      setErrorMessage(message);
     } finally {
       setResolving(false);
     }
@@ -113,14 +126,12 @@ export default function ScanPage() {
 
   function handleManualSubmit(e: FormEvent) {
     e.preventDefault();
-    if (manualCode.trim()) {
-      handleResolveCode(manualCode.trim());
-    }
+    handleResolveCode(manualCode);
   }
 
   function handleReset() {
-    setResolvedResult(null);
     setResolvedCode(null);
+    setResolvedResult(null);
     setErrorMessage(null);
     setManualCode('');
     setCameraActive(true);
@@ -189,10 +200,10 @@ export default function ScanPage() {
               ) : (
                 <ul style={{ margin: 0, paddingLeft: 'var(--space-4)' }}>
                   {debugCameras.map((cam, idx) => (
-                    <li key={cam.id || idx}>
+                    <li key={cam.deviceId || idx}>
                       <strong>{cam.label || `Camera #${idx + 1}`}</strong>
                       <span style={{ color: 'var(--color-text-muted)', display: 'block', fontSize: '0.7rem' }}>
-                        ID: {cam.id ? `${cam.id.slice(0, 20)}…` : 'default'}
+                        ID: {cam.deviceId ? `${cam.deviceId.slice(0, 20)}…` : 'default'}
                       </span>
                     </li>
                   ))}
@@ -203,177 +214,156 @@ export default function ScanPage() {
         </div>
       )}
 
-      {/* Main Resolution Container */}
-      {!equipment && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
-          {/* Camera Scanner View */}
-          <div
-            className="card"
-            style={{
-              padding: 'var(--space-4)',
-              background: 'var(--color-surface)',
-              border: '1px solid var(--color-border-subtle)',
-              borderRadius: 'var(--radius-lg)',
-            }}
+      {/* Main Scanner Section */}
+      {!resolvedResult && (
+        <div className="card" style={{ marginBottom: 'var(--space-6)', padding: 'var(--space-5)' }}>
+          <CameraScanner
+            onScan={handleResolveCode}
+            active={cameraActive}
+            onToggleActive={setCameraActive}
+            testPageUrl={testPageUrl}
+          />
+        </div>
+      )}
+
+      {/* Manual Entry Fallback Form */}
+      <div className="card" style={{ marginBottom: 'var(--space-6)', padding: 'var(--space-5)' }}>
+        <h2 style={{ fontSize: 'var(--text-base)', fontWeight: 600, marginBottom: 'var(--space-2)' }}>
+          Manual Asset Code Lookup
+        </h2>
+        <p style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)', marginBottom: 'var(--space-3)' }}>
+          Use if the QR tag is damaged, unreadable, or camera permissions are unavailable.
+        </p>
+
+        <form onSubmit={handleManualSubmit} style={{ display: 'flex', gap: 'var(--space-2)' }}>
+          <input
+            id="manual-asset-code-input"
+            type="text"
+            className="input"
+            placeholder="e.g. CRN-50-001, GEN-250-001"
+            value={manualCode}
+            onChange={(e) => setManualCode(e.target.value.toUpperCase())}
+            style={{ flex: 1, fontFamily: 'var(--font-mono)' }}
+            disabled={resolving}
+          />
+          <button
+            id="manual-asset-lookup-btn"
+            type="submit"
+            className="btn btn-primary"
+            disabled={resolving || !manualCode.trim()}
           >
-            <CameraScanner
-              active={cameraActive && !resolving}
-              onScan={(scannedCode) => {
-                handleResolveCode(scannedCode);
-              }}
-              onToggleActive={(active) => setCameraActive(active)}
-              testPageUrl={testPageUrl}
-            />
-          </div>
+            {resolving ? 'Looking up…' : 'Look Up'}
+          </button>
+        </form>
+      </div>
 
-          {/* Resolving Status Indicator */}
-          {resolving && (
-            <div
-              className="card"
-              style={{
-                padding: 'var(--space-4)',
-                textAlign: 'center',
-                background: 'var(--color-surface)',
-                border: '1px solid var(--color-border)',
-              }}
-            >
-              <div className="spinner spinner-md" style={{ margin: '0 auto var(--space-2)' }} />
-              <p style={{ fontSize: 'var(--text-sm)', color: 'var(--color-text-muted)' }}>
-                Resolving asset code: <strong style={{ color: 'var(--color-text)' }}>{resolvedCode}</strong>…
-              </p>
+      {/* Resolution Loading Spinner */}
+      {resolving && (
+        <div className="card" style={{ textAlign: 'center', padding: 'var(--space-8)' }}>
+          <div className="spinner spinner-lg" style={{ margin: '0 auto var(--space-4)' }} />
+          <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)' }}>
+            Resolving asset <strong>{resolvedCode}</strong>…
+          </p>
+          <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-subtle)' }}>
+            Checking local offline snapshot, then querying server…
+          </span>
+        </div>
+      )}
+
+      {/* Error Alert */}
+      {errorMessage && !resolving && (
+        <div
+          className="alert alert-error animate-fade-in"
+          style={{ marginBottom: 'var(--space-6)' }}
+          role="alert"
+        >
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', width: '100%' }}>
+            <div>
+              <strong>Lookup Failed:</strong> {errorMessage}
             </div>
-          )}
-
-          {/* Resolution Error Banner */}
-          {errorMessage && !resolving && (
-            <div
-              className="card"
-              role="alert"
-              style={{
-                padding: 'var(--space-4)',
-                background: 'rgba(239, 68, 68, 0.1)',
-                border: '1px solid var(--color-danger)',
-                borderRadius: 'var(--radius-md)',
-                display: 'flex',
-                alignItems: 'flex-start',
-                gap: 'var(--space-3)',
-              }}
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => setErrorMessage(null)}
+              style={{ padding: '0 var(--space-2)', fontSize: 'var(--text-xs)' }}
             >
-              <span style={{ fontSize: '1.25rem' }}>⚠️</span>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, color: 'var(--color-danger)', fontSize: 'var(--text-sm)' }}>
-                  Lookup Failed
-                </div>
-                <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text)', marginTop: '2px' }}>
-                  {errorMessage}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Manual Entry Fallback Form */}
-          <div
-            className="card"
-            style={{
-              padding: 'var(--space-5)',
-              background: 'var(--color-surface)',
-              border: '1px solid var(--color-border-subtle)',
-              borderRadius: 'var(--radius-lg)',
-            }}
-          >
-            <h2 style={{ fontSize: 'var(--text-base)', fontWeight: 600, marginBottom: 'var(--space-2)' }}>
-              ⌨ Manual Asset Code Entry
-            </h2>
-            <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-xs)', marginBottom: 'var(--space-4)' }}>
-              If camera scanning is unavailable or the QR label is damaged, type the asset code printed on the machine tag.
-            </p>
-
-            <form onSubmit={handleManualSubmit} style={{ display: 'flex', gap: 'var(--space-2)' }}>
-              <input
-                id="manual-asset-input"
-                type="text"
-                className="input"
-                placeholder="e.g. CRN-50-001 or GEN-250-001"
-                value={manualCode}
-                onChange={(e) => setManualCode(e.target.value)}
-                disabled={resolving}
-                style={{ flex: 1, fontFamily: 'var(--font-mono)', textTransform: 'uppercase' }}
-              />
-              <button
-                id="manual-asset-submit"
-                type="submit"
-                className="btn btn-primary"
-                disabled={resolving || !manualCode.trim()}
-              >
-                Look Up Asset
-              </button>
-            </form>
+              Dismiss
+            </button>
           </div>
         </div>
       )}
 
-      {/* Resolved Equipment Card View */}
-      {equipment && (
-        <div
-          className="card animate-fade-up"
-          style={{
-            padding: 'var(--space-6)',
-            background: 'var(--color-surface)',
-            border: '2px solid var(--color-primary)',
-            borderRadius: 'var(--radius-lg)',
-            boxShadow: 'var(--shadow-lg)',
-          }}
-        >
-          {/* Card Header */}
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'flex-start',
-              justifyContent: 'space-between',
-              marginBottom: 'var(--space-4)',
-              borderBottom: '1px solid var(--color-border-subtle)',
-              paddingBottom: 'var(--space-4)',
-            }}
-          >
+      {/* Resolved Equipment Card */}
+      {equipment && !resolving && (
+        <div className="card animate-scale-in" style={{ padding: 'var(--space-6)', border: '2px solid var(--color-primary)' }}>
+          {/* Card Header with Badges */}
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 'var(--space-4)', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
             <div>
-              <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)', textTransform: 'uppercase' }}>
-                Asset Tag Detected
-              </span>
-              <h2
-                style={{
-                  fontSize: 'var(--text-2xl)',
-                  fontWeight: 700,
-                  fontFamily: 'var(--font-mono)',
-                  color: 'var(--color-primary)',
-                  letterSpacing: '0.05em',
-                }}
-              >
-                {equipment.asset_code}
-              </h2>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-1)' }}>
+                <h2 style={{ fontSize: 'var(--text-xl)', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
+                  {equipment.asset_code}
+                </h2>
+                <span className={`status-badge ${STATUS_CLASSES[equipment.status] || ''}`}>
+                  {STATUS_LABELS[equipment.status] || equipment.status}
+                </span>
+              </div>
+              <p style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-sm)', margin: 0 }}>
+                {equipment.make} {equipment.model} — {equipment.type_name}
+              </p>
             </div>
 
-            <div style={{ display: 'flex', gap: 'var(--space-2)', alignItems: 'center' }}>
-              <span className={`status-badge ${STATUS_CLASSES[equipment.status] || ''}`}>
-                {STATUS_LABELS[equipment.status] || equipment.status}
-              </span>
-              <span
-                className={`badge ${
-                  resolvedResult?.source === 'snapshot' ? 'badge-warning' : 'badge-success'
-                }`}
-                style={{ fontSize: 'var(--text-xs)' }}
-              >
-                {resolvedResult?.source === 'snapshot' ? '⚡ Local Snapshot' : '● Live API'}
-              </span>
+            {/* Data Source Badge (Live vs Snapshot) */}
+            <div style={{ textAlign: 'right' }}>
+              {resolvedResult?.source === 'live' ? (
+                <span
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 4,
+                    fontSize: 'var(--text-xs)',
+                    fontWeight: 600,
+                    color: 'var(--color-success)',
+                    background: 'rgba(34, 197, 94, 0.1)',
+                    padding: '2px 8px',
+                    borderRadius: 'var(--radius-sm)',
+                    border: '1px solid rgba(34, 197, 94, 0.25)',
+                  }}
+                >
+                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--color-success)' }} />
+                  Live Server Data
+                </span>
+              ) : (
+                <span
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 4,
+                    fontSize: 'var(--text-xs)',
+                    fontWeight: 600,
+                    color: 'var(--color-warning)',
+                    background: 'rgba(234, 179, 8, 0.1)',
+                    padding: '2px 8px',
+                    borderRadius: 'var(--radius-sm)',
+                    border: '1px solid rgba(234, 179, 8, 0.25)',
+                  }}
+                >
+                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--color-warning)' }} />
+                  Cached Snapshot (Offline)
+                </span>
+              )}
             </div>
           </div>
 
-          {/* Machine Details Grid */}
+          {/* Asset Key Information Grid */}
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-              gap: 'var(--space-4)',
-              marginBottom: 'var(--space-6)',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+              gap: 'var(--space-3)',
+              marginBottom: 'var(--space-5)',
+              background: 'var(--color-surface-2)',
+              padding: 'var(--space-4)',
+              borderRadius: 'var(--radius-md)',
             }}
           >
             <div>

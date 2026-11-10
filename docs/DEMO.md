@@ -17,7 +17,7 @@ npm --workspace=backend run dev
 
 ### Pre-configured Demo Accounts
 | Role | Email | Password | Scope & Visibility |
-| :--- | :--- | :--- | :--- |
+:--- | :--- | :--- | :---
 | **Admin** | `admin@spaceexspace.com` | `Admin#2026!Dev` | Full commercial access: rentals, rates, quotations, invoices, and fleet audit. |
 | **Staff** | `staff@spaceexspace.com` | `Staff#2026!Dev` | Yard operations: QR code scanning, relocation, check-in, repair dispatch, stock issue. **Zero rates or prices visible.** |
 
@@ -170,17 +170,48 @@ To demonstrate why `v_equipment_current` orders by physical occurrence time (`mo
 
 ---
 
-## 3. Automated Test Verification
+## 3. How to Demo the Native QR Code Scanner (ADR 019)
 
-All offline capabilities, idempotency guarantees, and edge cases are verified through automated integration tests:
+The platform includes a native, lightweight QR code scanner built on WebRTC `getUserMedia` and `jsQR` (ADR 019), designed for yard technicians operating mobile phones and rugged tablets in outdoor Saudi Arabian industrial yards.
+
+### Features to Demonstrate:
+1. **Live Camera Tag Recognition**:
+   - Navigate to `/staff/scan` or `/admin/scan`.
+   - Point the camera at a printed QR tag from `/api/labels/sheet` (e.g. `CRN-50-001`, `GEN-250-001`).
+   - The scanner decodes the QR matrix at **5–8 frames per second** with a 640px offscreen canvas, emits a **50ms haptic vibration** on mobile devices, and resolves the machine record from the local snapshot in under 15ms.
+2. **Duplicate Read Cooldown (3 Seconds)**:
+   - Hold the camera steadily over the same physical tag.
+   - The scanner reads the code once and locks repeat scans of the exact same code for **3,000 ms** to prevent duplicate actions or sound bursts.
+   - Scanning a *different* machine tag is accepted immediately without delay.
+3. **8-Second Hardware Watchdog & Self-Healing Retry**:
+   - If a mobile OS or browser video pipeline stalls and delivers 0 video frames within 8 seconds, the engine automatically catches the condition, transitions to idle, and displays `WatchdogTimeoutError` with a single-click **Retry Camera** button.
+   - Clicking **Retry Camera** cleanly re-initializes the camera pipeline without page reloads.
+4. **Developer Diagnostic HUD (`?debug=1`)**:
+   - Append `?debug=1` to the URL: `http://localhost:5173/staff/scan?debug=1`.
+   - Inspect the real-time diagnostic card showing:
+     - `window.isSecureContext` (`true` for HTTPS or `localhost`).
+     - Browser User Agent.
+     - Enumerated video input hardware queried directly via `navigator.mediaDevices.enumerateDevices()`.
+     - Link to the minimal raw `getUserMedia` test harness at `/staff/camera-test`.
+5. **Always-Available Manual Asset Code Lookup**:
+   - For cases where physical QR tags are mud-splattered, sun-bleached, or camera access is denied:
+   - Type `CRN-50-001` or `crn-50-001` into the manual entry input.
+   - Hit **Look Up** (or press Enter).
+   - Resolves instantly from IndexedDB offline storage first, then checks the server if online.
+
+---
+
+## 4. Automated Test Verification
+
+All offline capabilities, idempotency guarantees, QR decoding pipelines, and edge cases are verified through automated integration tests:
 
 ```bash
-# Run the dedicated offline sync and snapshot test suite (24 tests)
-npm --workspace=backend run test -- src/__tests__/offline_events.test.ts
+# Run the complete frontend test suite (99 tests across 8 suites)
+npm run test:frontend
 
-# Run the complete test suite across all modules (79 tests)
-npm --workspace=backend run test
+# Run the complete backend test suite (163 tests across 11 suites)
+npm run test:backend
 
-# Run TypeScript linter
-npm --workspace=backend run lint
+# Verify production client build
+npm run build:frontend
 ```

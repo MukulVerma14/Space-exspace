@@ -1,18 +1,25 @@
 /**
- * CameraScanner — QR Code scanner component powered by html5-qrcode.
+ * CameraScanner — QR Code scanner component powered by native getUserMedia + jsQR (F-S6).
  *
- * SPECIFICATION (F-S1 & F-S5):
- * - Frame rate: limited to ~5 frames per second (fps: 5)
- * - Cooldown: ignores the same decoded asset code for 3 seconds (3,000 ms) after a read
- * - Lifecycle: reliably stops the camera stream on unmount or pause
- * - Constraints: facingMode "environment" as ideal constraint (not exact), falling back to getCameras()[0]
- * - Mount guard: container is mounted and has non-zero size before start(); guards against React StrictMode double mounts
- * - Diagnosis: logs exact error to console and displays error name, message, and plain-language hint on screen
+ * SPECIFICATION (F-S6):
+ * - Replaces html5-qrcode with custom native scanner pipeline
+ * - Stream: getUserMedia with { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }
+ * - Attaches to <video playsInline muted autoPlay>, awaits metadata and play()
+ * - Decode loop: requestAnimationFrame throttled to 5-8 fps (~140ms), offscreen canvas max 640px wide (willReadFrequently: true)
+ * - jsQR decoding: ignores duplicate code for 3 seconds, vibrates 50ms on success if supported
+ * - Lifecycle state machine: idle, starting, running, stopping
+ *   - start() is idempotent
+ *   - Retry cancels in-flight start and starts afresh
+ *   - stop() stops every track, cancels RAF, clears srcObject
+ *   - Safe under React StrictMode double mounts
+ *   - Pauses on document visibility hidden, resumes on visible
+ * - Watchdog: if no video frames arrive within 8 seconds, shows clear error with working Retry
+ * - Uses cameraErrors.ts for user-friendly diagnostic mapping
  */
 
-import { useEffect, useRef, useState } from 'react';
-import { Html5Qrcode } from 'html5-qrcode';
-import { parseCameraError, CameraDiagnosticInfo } from '../utils/cameraErrors';
+import { useEffect, useRef, useState, useCallback } from 'react';
+import { ScannerEngine, ScannerLifecycleState } from '../utils/scannerEngine';
+import { CameraDiagnosticInfo } from '../utils/cameraErrors';
 
 export interface CameraScannerProps {
   onScan: (assetCode: string) => void;
@@ -21,27 +28,19 @@ export interface CameraScannerProps {
   testPageUrl?: string;
 }
 
-export type ScannerStatus = 'initializing' | 'scanning' | 'paused' | 'error' | 'unsupported';
-
-const READER_ELEMENT_ID = 'sx-qr-reader';
-const SCAN_COOLDOWN_MS = 3000;
-const SCAN_FPS = 5;
-
 export function CameraScanner({
   onScan,
   active,
   onToggleActive,
   testPageUrl = '/staff/camera-test',
 }: CameraScannerProps) {
-  const [status, setStatus] = useState<ScannerStatus>('initializing');
+  const [engineState, setEngineState] = useState<ScannerLifecycleState>('idle');
   const [diagnosticError, setDiagnosticError] = useState<CameraDiagnosticInfo | null>(null);
   const [lastScannedCode, setLastScannedCode] = useState<string | null>(null);
 
-  const scannerRef = useRef<Html5Qrcode | null>(null);
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const lastScannedCodeRef = useRef<string | null>(null);
-  const lastScannedTimeRef = useRef<number>(0);
-  const mountIdRef = useRef<number>(0);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const engineRef = useRef<ScannerEngine | null>(null);
+  const pausedByVisibilityRef = useRef<boolean>(false);
 
   // Check browser mediaDevices support
   const isSupported =
@@ -49,9 +48,26 @@ export function CameraScanner({
     !!navigator.mediaDevices &&
     typeof navigator.mediaDevices.getUserMedia === 'function';
 
+  // Instantiate scanner engine once
+  if (!engineRef.current && isSupported) {
+    engineRef.current = new ScannerEngine({
+      videoElement: null,
+      onScan: (code: string) => {
+        setLastScannedCode(code);
+        onScan(code);
+      },
+      onError: (err: CameraDiagnosticInfo) => {
+        setDiagnosticError(err);
+      },
+      onStateChange: (state: ScannerLifecycleState) => {
+        setEngineState(state);
+      },
+    });
+  }
+
+  // Handle stream startup, teardown, and active prop toggling
   useEffect(() => {
     if (!isSupported) {
-      setStatus('unsupported');
       setDiagnosticError({
         name: 'NotSupportedError',
         message: 'navigator.mediaDevices.getUserMedia is not available in this environment',
@@ -60,185 +76,64 @@ export function CameraScanner({
       return;
     }
 
-    if (!active) {
-      setStatus('paused');
-      return;
+    const engine = engineRef.current;
+    if (!engine) return;
+
+    if (videoRef.current) {
+      engine.setVideoElement(videoRef.current);
     }
 
-    const currentMountId = ++mountIdRef.current;
-    let isCancelled = false;
-
-    setStatus('initializing');
-    setDiagnosticError(null);
-
-    async function initScanner() {
-      // 1. Guard against React StrictMode double mount: stop & clear any previous instance
-      if (scannerRef.current) {
-        const oldInstance = scannerRef.current;
-        scannerRef.current = null;
-        try {
-          if (oldInstance.isScanning) {
-            await oldInstance.stop();
-          }
-        } catch (stopErr) {
-          console.warn('[CameraScanner] Teardown stop error:', stopErr);
-        }
-        try {
-          oldInstance.clear();
-        } catch (clearErr) {
-          console.warn('[CameraScanner] Teardown clear error:', clearErr);
-        }
-      }
-
-      // Check if unmounted while awaiting previous teardown
-      if (isCancelled || mountIdRef.current !== currentMountId) {
-        return;
-      }
-
-      // 2. Ensure container element exists and has non-zero size before start()
-      if (!containerRef.current) {
-        await new Promise((r) => requestAnimationFrame(r));
-      }
-
-      if (isCancelled || mountIdRef.current !== currentMountId) {
-        return;
-      }
-
-      const containerEl = document.getElementById(READER_ELEMENT_ID);
-      if (!containerEl) {
-        console.error('[CameraScanner] Target DOM container element missing:', READER_ELEMENT_ID);
-        return;
-      }
-
-      const html5Qr = new Html5Qrcode(READER_ELEMENT_ID);
-      scannerRef.current = html5Qr;
-
-      const config = {
-        fps: SCAN_FPS,
-        qrbox: { width: 240, height: 240 },
-        aspectRatio: 1.0,
-      };
-
-      const handleScanSuccess = (decodedText: string) => {
-        if (isCancelled || mountIdRef.current !== currentMountId) return;
-        const cleanText = decodedText.trim();
-        if (!cleanText) return;
-
-        const now = Date.now();
-        // Ignore repeat reads of identical asset code within 3 seconds
-        if (
-          cleanText.toLowerCase() === lastScannedCodeRef.current?.toLowerCase() &&
-          now - lastScannedTimeRef.current < SCAN_COOLDOWN_MS
-        ) {
-          return;
-        }
-
-        lastScannedCodeRef.current = cleanText;
-        lastScannedTimeRef.current = now;
-        setLastScannedCode(cleanText);
-
-        onScan(cleanText);
-      };
-
-      try {
-        // 3. Use facingMode "environment" as ideal constraint (not exact)
-        try {
-          await html5Qr.start(
-            { facingMode: { ideal: 'environment' } },
-            config,
-            handleScanSuccess,
-            () => {
-              // Normal frame misses; silently ignore
-            }
-          );
-        } catch (idealFacingErr: unknown) {
-          console.warn(
-            '[CameraScanner] facingMode { ideal: "environment" } start failed, attempting getCameras() fallback:',
-            idealFacingErr
-          );
-
-          // Fallback to the first available camera from getCameras()
-          const cameras = await Html5Qrcode.getCameras().catch(() => []);
-          if (cameras && cameras.length > 0) {
-            console.info('[CameraScanner] Falling back to camera device ID:', cameras[0].id, cameras[0].label);
-            await html5Qr.start(
-              cameras[0].id,
-              config,
-              handleScanSuccess,
-              () => {}
-            );
-          } else {
-            // No camera fallback available; rethrow initial error for diagnostic reporting
-            throw idealFacingErr;
-          }
-        }
-
-        if (isCancelled || mountIdRef.current !== currentMountId) {
-          // Unmounted while start() was in flight
-          try {
-            if (html5Qr.isScanning) {
-              await html5Qr.stop();
-            }
-          } catch {
-            // Ignore
-          }
-          try {
-            html5Qr.clear();
-          } catch {
-            // Ignore
-          }
-          return;
-        }
-
-        setStatus('scanning');
-      } catch (err: unknown) {
-        if (isCancelled || mountIdRef.current !== currentMountId) return;
-
-        // Log exact error name and message to console
-        console.error('[CameraScanner] Failed to start camera stream:', err);
-
-        const diagnostic = parseCameraError(err);
-        setDiagnosticError(diagnostic);
-        setStatus('error');
-      }
+    if (active) {
+      setDiagnosticError(null);
+      engine.start();
+    } else {
+      engine.stop();
     }
 
-    initScanner();
-
+    // Unmount cleanup: safe under React StrictMode double mounts
     return () => {
-      isCancelled = true;
-      const instance = scannerRef.current;
-      scannerRef.current = null;
-      if (instance) {
-        if (instance.isScanning) {
-          instance
-            .stop()
-            .catch(() => {})
-            .finally(() => {
-              try {
-                instance.clear();
-              } catch {
-                // Ignore clear error during unmount
-              }
-            });
-        } else {
-          try {
-            instance.clear();
-          } catch {
-            // Ignore
-          }
+      engine.stop();
+    };
+  }, [active, isSupported]);
+
+  // Page visibility listener: pause on hidden, resume on visible
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      const engine = engineRef.current;
+      if (!engine) return;
+
+      if (document.visibilityState === 'hidden') {
+        const state = engine.getState();
+        if (state === 'running' || state === 'starting') {
+          pausedByVisibilityRef.current = true;
+          engine.stop();
+        }
+      } else if (document.visibilityState === 'visible') {
+        if (pausedByVisibilityRef.current && active) {
+          pausedByVisibilityRef.current = false;
+          engine.start();
         }
       }
     };
-  }, [active, isSupported, onScan]);
 
-  function handleRetry() {
-    setStatus('initializing');
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [active]);
+
+  const handleRetry = useCallback(() => {
     setDiagnosticError(null);
     if (onToggleActive) {
       onToggleActive(true);
     }
-  }
+    if (engineRef.current) {
+      if (videoRef.current) {
+        engineRef.current.setVideoElement(videoRef.current);
+      }
+      engineRef.current.retry();
+    }
+  }, [onToggleActive]);
 
   return (
     <div
@@ -269,21 +164,24 @@ export function CameraScanner({
           justifyContent: 'center',
         }}
       >
-        {/* html5-qrcode camera stream container: NEVER display:none so clientWidth/clientHeight are always > 0 */}
-        <div
-          id={READER_ELEMENT_ID}
-          ref={containerRef}
+        {/* Direct native <video> element with playsInline muted autoPlay */}
+        <video
+          ref={videoRef}
+          playsInline
+          muted
+          autoPlay
           style={{
             position: 'absolute',
             inset: 0,
             width: '100%',
             height: '100%',
-            visibility: status === 'scanning' ? 'visible' : 'hidden',
+            objectFit: 'cover',
+            visibility: engineState === 'running' ? 'visible' : 'hidden',
           }}
         />
 
-        {/* Viewfinder crosshairs / targeting overlay when scanning */}
-        {status === 'scanning' && (
+        {/* Viewfinder crosshairs / targeting overlay when running */}
+        {engineState === 'running' && (
           <div
             style={{
               position: 'absolute',
@@ -353,8 +251,8 @@ export function CameraScanner({
           </div>
         )}
 
-        {/* Initializing State */}
-        {status === 'initializing' && (
+        {/* Starting / Initializing State */}
+        {engineState === 'starting' && (
           <div
             style={{
               display: 'flex',
@@ -369,13 +267,13 @@ export function CameraScanner({
           >
             <div className="spinner spinner-lg" />
             <div style={{ fontSize: 'var(--text-sm)', color: 'var(--color-border)' }}>
-              Starting camera (5 fps)…
+              Starting camera (jsQR engine)…
             </div>
           </div>
         )}
 
-        {/* Paused State */}
-        {status === 'paused' && (
+        {/* Paused / Idle State */}
+        {engineState === 'idle' && !diagnosticError && !active && (
           <div
             style={{
               display: 'flex',
@@ -406,8 +304,8 @@ export function CameraScanner({
           </div>
         )}
 
-        {/* Error / Permission Denied State */}
-        {(status === 'error' || status === 'unsupported') && diagnosticError && (
+        {/* Error / Watchdog Timeout State */}
+        {diagnosticError && (
           <div
             style={{
               display: 'flex',
@@ -466,16 +364,14 @@ export function CameraScanner({
             </p>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', width: '100%', marginTop: 'var(--space-1)' }}>
-              {status === 'error' && (
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={handleRetry}
-                  style={{ fontSize: 'var(--text-xs)', width: '100%' }}
-                >
-                  🔄 Retry Camera
-                </button>
-              )}
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleRetry}
+                style={{ fontSize: 'var(--text-xs)', width: '100%' }}
+              >
+                🔄 Retry Camera
+              </button>
 
               <a
                 href={testPageUrl}
@@ -510,20 +406,20 @@ export function CameraScanner({
               width: 8,
               height: 8,
               borderRadius: '50%',
-              backgroundColor: status === 'scanning' ? 'var(--color-success)' : 'var(--color-text-subtle)',
+              backgroundColor: engineState === 'running' ? 'var(--color-success)' : 'var(--color-text-subtle)',
               display: 'inline-block',
             }}
           />
           <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)' }}>
-            {status === 'scanning'
+            {engineState === 'running'
               ? 'Aim at equipment QR tag'
-              : status === 'paused'
+              : !active
               ? 'Camera paused'
               : 'Manual entry available'}
           </span>
         </div>
 
-        {onToggleActive && status === 'scanning' && (
+        {onToggleActive && engineState === 'running' && (
           <button
             type="button"
             className="btn btn-ghost"
@@ -535,7 +431,7 @@ export function CameraScanner({
         )}
       </div>
 
-      {lastScannedCode && status === 'scanning' && (
+      {lastScannedCode && engineState === 'running' && (
         <div
           style={{
             marginTop: 'var(--space-2)',

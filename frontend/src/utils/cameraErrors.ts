@@ -1,7 +1,7 @@
 /**
  * Camera error parsing and diagnostic utilities for SPACE EXSPACE.
  *
- * SPECIFICATION (F-S5):
+ * SPECIFICATION (F-S5 & F-S6):
  * Maps exact browser MediaDevices error names to clear, actionable plain-language hints:
  * - NotAllowedError: Permission denied by user or OS
  * - NotFoundError: No physical camera found or connected
@@ -9,6 +9,7 @@
  * - OverconstrainedError: Requested constraints (facingMode) cannot be satisfied
  * - SecurityError: Insecure context or Permissions-Policy blocked
  * - AbortError: Operation cancelled / hardware reset
+ * - WatchdogTimeoutError: Camera stream started but delivered no video frames within 8s
  */
 
 export interface CameraDiagnosticInfo {
@@ -54,6 +55,8 @@ export function parseCameraError(err: unknown): CameraDiagnosticInfo {
       name = 'SecurityError';
     } else if (err.includes('AbortError')) {
       name = 'AbortError';
+    } else if (err.includes('WatchdogTimeoutError') || err.includes('TimeoutError')) {
+      name = 'WatchdogTimeoutError';
     }
   } else {
     message = String(err);
@@ -88,6 +91,8 @@ export function parseCameraError(err: unknown): CameraDiagnosticInfo {
       name = 'SecurityError';
     } else if (message.includes('AbortError')) {
       name = 'AbortError';
+    } else if (message.includes('WatchdogTimeoutError') || message.includes('TimeoutError')) {
+      name = 'WatchdogTimeoutError';
     }
   }
 
@@ -125,6 +130,12 @@ export function parseCameraError(err: unknown): CameraDiagnosticInfo {
     case 'AbortError':
       hint =
         'Camera initialization was aborted before it could complete. Please try scanning again.';
+      break;
+
+    case 'WatchdogTimeoutError':
+    case 'TimeoutError':
+      hint =
+        'The camera stream was established but delivered no video frames within 8 seconds. Please click Retry or use manual entry below.';
       break;
 
     default:

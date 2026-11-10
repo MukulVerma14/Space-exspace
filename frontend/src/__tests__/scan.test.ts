@@ -1,10 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import qrcode from 'qrcode';
+import { PNG } from 'pngjs';
 import { resolveEquipmentByCode } from '../data/equipmentSource';
 import { parseCameraError } from '../utils/cameraErrors';
+import { decodeFrame, computeScaledDimensions } from '../utils/qrDecoder';
+import { ScannerEngine } from '../utils/scannerEngine';
 import * as dbModule from '../offline/db';
 import { api } from '../api/client';
 
-describe('Scan System & QR Protocol (F-S1)', () => {
+describe('Scan System & QR Protocol (F-S1 & F-S6)', () => {
   const sampleLabelQrCodes = [
     'CRN-50-001',
     'GEN-250-001',
@@ -18,6 +22,294 @@ describe('Scan System & QR Protocol (F-S1)', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  describe('Pure decodeFrame with real QR PNG (jsQR + qrcode + pngjs)', () => {
+    it.each(sampleLabelQrCodes)(
+      'decodes real generated QR PNG for "%s" without browser canvas',
+      async (code) => {
+        // Generate real QR code as PNG buffer using qrcode package
+        const pngBuffer = await qrcode.toBuffer(code, {
+          type: 'png',
+          errorCorrectionLevel: 'H',
+          margin: 2,
+          width: 300,
+        });
+
+        // Parse with pngjs
+        const png = PNG.sync.read(pngBuffer);
+
+        // Decode with pure decodeFrame function
+        const decoded = decodeFrame({
+          data: new Uint8ClampedArray(png.data),
+          width: png.width,
+          height: png.height,
+        });
+
+        expect(decoded).toBe(code);
+      }
+    );
+
+    it('returns null when given blank, empty, or non-QR image data', () => {
+      // 50x50 solid blank image
+      const blankData = new Uint8ClampedArray(50 * 50 * 4);
+      expect(decodeFrame({ data: blankData, width: 50, height: 50 })).toBeNull();
+      expect(decodeFrame({ data: new Uint8ClampedArray(0), width: 0, height: 0 })).toBeNull();
+    });
+
+    it('computeScaledDimensions correctly scales video frames to max 640px wide', () => {
+      // 1280x720 (16:9) scales down to 640x360
+      const scaled169 = computeScaledDimensions(1280, 720, 640);
+      expect(scaled169.width).toBe(640);
+      expect(scaled169.height).toBe(360);
+
+      // Smaller frame 320x240 remains untouched
+      const scaledSmall = computeScaledDimensions(320, 240, 640);
+      expect(scaledSmall.width).toBe(320);
+      expect(scaledSmall.height).toBe(240);
+
+      // 1920x1080 scales down to 640x360
+      const scaled1080 = computeScaledDimensions(1920, 1080, 640);
+      expect(scaled1080.width).toBe(640);
+      expect(scaled1080.height).toBe(360);
+    });
+  });
+
+  describe('ScannerEngine Lifecycle & State Machine (F-S6)', () => {
+    function createMockTrack() {
+      return {
+        stop: vi.fn(),
+        kind: 'video',
+        enabled: true,
+      };
+    }
+
+    function createMockStream() {
+      const track = createMockTrack();
+      return {
+        getTracks: vi.fn(() => [track]),
+        getVideoTracks: vi.fn(() => [track]),
+        _track: track,
+      };
+    }
+
+    function createMockVideo() {
+      const listeners: Record<string, (() => void)[]> = {};
+      return {
+        srcObject: null as any,
+        readyState: 4,
+        videoWidth: 640,
+        videoHeight: 480,
+        currentTime: 1.0,
+        play: vi.fn().mockResolvedValue(undefined),
+        pause: vi.fn(),
+        addEventListener: vi.fn((event: string, cb: () => void) => {
+          if (!listeners[event]) listeners[event] = [];
+          listeners[event].push(cb);
+        }),
+        removeEventListener: vi.fn((event: string, cb: () => void) => {
+          if (listeners[event]) {
+            listeners[event] = listeners[event].filter((c) => c !== cb);
+          }
+        }),
+        _trigger: (event: string) => {
+          listeners[event]?.forEach((cb) => cb());
+        },
+      } as unknown as HTMLVideoElement;
+    }
+
+    it('starts camera stream and is idempotent when start() is called twice', async () => {
+      const mockStream = createMockStream();
+      const mockGetUserMedia = vi.fn().mockResolvedValue(mockStream);
+      vi.stubGlobal('navigator', {
+        mediaDevices: {
+          getUserMedia: mockGetUserMedia,
+        },
+      });
+
+      const video = createMockVideo();
+      const onScan = vi.fn();
+      const onError = vi.fn();
+      const stateHistory: string[] = [];
+
+      const engine = new ScannerEngine({
+        videoElement: video,
+        onScan,
+        onError,
+        onStateChange: (state) => stateHistory.push(state),
+      });
+
+      expect(engine.getState()).toBe('idle');
+
+      // Call start twice in parallel
+      const p1 = engine.start();
+      const p2 = engine.start();
+
+      await Promise.all([p1, p2]);
+
+      // getUserMedia called only once due to starting guard
+      expect(mockGetUserMedia).toHaveBeenCalledTimes(1);
+      expect(engine.getState()).toBe('running');
+      expect(video.srcObject).toBe(mockStream);
+      expect(video.play).toHaveBeenCalledTimes(1);
+    });
+
+    it('cancels and stops tracks if stop() is called while start() is in flight', async () => {
+      let resolveGetUserMedia: (stream: any) => void = () => {};
+      const getUserMediaPromise = new Promise((resolve) => {
+        resolveGetUserMedia = resolve;
+      });
+
+      const mockGetUserMedia = vi.fn().mockReturnValue(getUserMediaPromise);
+      vi.stubGlobal('navigator', {
+        mediaDevices: {
+          getUserMedia: mockGetUserMedia,
+        },
+      });
+
+      const video = createMockVideo();
+      const onScan = vi.fn();
+      const onError = vi.fn();
+
+      const engine = new ScannerEngine({
+        videoElement: video,
+        onScan,
+        onError,
+      });
+
+      // 1. Kick off start()
+      const startPromise = engine.start();
+      expect(engine.getState()).toBe('starting');
+
+      // 2. Call stop() before getUserMedia resolves (e.g. fast user back navigation or StrictMode)
+      engine.stop();
+      expect(engine.getState()).toBe('idle');
+
+      // 3. getUserMedia resolves later
+      const delayedStream = createMockStream();
+      resolveGetUserMedia(delayedStream);
+      await startPromise;
+
+      // Stream tracks must be stopped immediately upon resolution
+      expect((delayedStream as any)._track.stop).toHaveBeenCalled();
+      // Video must NOT have received srcObject
+      expect(video.srcObject).toBeNull();
+      expect(engine.getState()).toBe('idle');
+    });
+
+    it('retry() cleanly cancels an in-flight start and starts a fresh session', async () => {
+      let resolveFirstGetUserMedia: (stream: any) => void = () => {};
+      const firstStreamPromise = new Promise((resolve) => {
+        resolveFirstGetUserMedia = resolve;
+      });
+
+      const secondStream = createMockStream();
+      const mockGetUserMedia = vi
+        .fn()
+        .mockReturnValueOnce(firstStreamPromise)
+        .mockResolvedValueOnce(secondStream);
+
+      vi.stubGlobal('navigator', {
+        mediaDevices: {
+          getUserMedia: mockGetUserMedia,
+        },
+      });
+
+      const video = createMockVideo();
+      const onScan = vi.fn();
+      const onError = vi.fn();
+
+      const engine = new ScannerEngine({
+        videoElement: video,
+        onScan,
+        onError,
+      });
+
+      // First start in-flight
+      const startPromise1 = engine.start();
+      expect(engine.getState()).toBe('starting');
+
+      // Retry called while first start is in-flight
+      const retryPromise = engine.retry();
+
+      // First stream eventually resolves
+      const firstStream = createMockStream();
+      resolveFirstGetUserMedia(firstStream);
+
+      await Promise.all([startPromise1, retryPromise]);
+
+      // First stream tracks stopped because its session was aborted
+      expect((firstStream as any)._track.stop).toHaveBeenCalled();
+      // Second stream is active
+      expect(video.srcObject).toBe(secondStream);
+      expect(engine.getState()).toBe('running');
+    });
+
+    it('cleans up all resources on unmount (stop)', async () => {
+      const mockStream = createMockStream();
+      const mockGetUserMedia = vi.fn().mockResolvedValue(mockStream);
+      vi.stubGlobal('navigator', {
+        mediaDevices: {
+          getUserMedia: mockGetUserMedia,
+        },
+      });
+
+      const video = createMockVideo();
+      const engine = new ScannerEngine({
+        videoElement: video,
+        onScan: vi.fn(),
+        onError: vi.fn(),
+      });
+
+      await engine.start();
+      expect(engine.getState()).toBe('running');
+
+      // Simulate unmount cleanup
+      engine.stop();
+
+      expect(engine.getState()).toBe('idle');
+      expect((mockStream as any)._track.stop).toHaveBeenCalled();
+      expect(video.srcObject).toBeNull();
+    });
+
+    it('triggers WatchdogTimeoutError when no video frames arrive within watchdog interval', async () => {
+      vi.useFakeTimers();
+
+      const mockStream = createMockStream();
+      vi.stubGlobal('navigator', {
+        mediaDevices: {
+          getUserMedia: vi.fn().mockResolvedValue(mockStream),
+        },
+      });
+
+      // Video with 0x0 size (never delivered frame)
+      const frozenVideo = createMockVideo();
+      (frozenVideo as any).videoWidth = 0;
+      (frozenVideo as any).videoHeight = 0;
+
+      const onError = vi.fn();
+      const engine = new ScannerEngine({
+        videoElement: frozenVideo,
+        onScan: vi.fn(),
+        onError,
+        watchdogTimeoutMs: 8000,
+      });
+
+      const startPromise = engine.start();
+      await vi.advanceTimersByTimeAsync(100);
+      await startPromise;
+
+      // Advance watchdog by 8000ms
+      await vi.advanceTimersByTimeAsync(8000);
+
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'WatchdogTimeoutError',
+          hint: expect.stringMatching(/delivered no video frames within 8 seconds/i),
+        })
+      );
+      expect(engine.getState()).toBe('idle');
+    });
   });
 
   describe('QR Scanner Cooldown (3-Second Debounce Rule)', () => {
@@ -45,7 +337,7 @@ describe('Scan System & QR Protocol (F-S1)', () => {
       expect(onScanCallback).toHaveBeenCalledTimes(1);
       expect(onScanCallback).toHaveBeenCalledWith('CRN-50-001');
 
-      // 2. Camera reads same QR code 500ms later (e.g. at 5 fps)
+      // 2. Camera reads same QR code 500ms later (e.g. at 5-8 fps)
       vi.advanceTimersByTime(500);
       simulateScan('CRN-50-001');
       expect(onScanCallback).toHaveBeenCalledTimes(1); // Ignored!
@@ -88,58 +380,6 @@ describe('Scan System & QR Protocol (F-S1)', () => {
       simulateScan('GEN-250-001');
       expect(onScanCallback).toHaveBeenCalledTimes(2);
       expect(onScanCallback).toHaveBeenLastCalledWith('GEN-250-001');
-    });
-  });
-
-  describe('Camera Configuration: 5 FPS & Lifecycle Cleanup', () => {
-    it('initializes camera with fps capped at 5 and square qrbox', async () => {
-      const mockStart = vi.fn().mockResolvedValue(undefined);
-      const scanner = {
-        start: mockStart,
-        stop: vi.fn().mockResolvedValue(undefined),
-        clear: vi.fn(),
-        isScanning: true,
-      };
-
-      const config = {
-        fps: 5,
-        qrbox: { width: 240, height: 240 },
-        aspectRatio: 1.0,
-      };
-
-      await scanner.start(
-        { facingMode: 'environment' },
-        config,
-        vi.fn(),
-        vi.fn()
-      );
-
-      expect(mockStart).toHaveBeenCalledWith(
-        { facingMode: 'environment' },
-        expect.objectContaining({ fps: 5, qrbox: { width: 240, height: 240 } }),
-        expect.any(Function),
-        expect.any(Function)
-      );
-    });
-
-    it('stops camera stream and clears elements on component unmount', async () => {
-      const mockStop = vi.fn().mockResolvedValue(undefined);
-      const mockClear = vi.fn();
-      const scanner = {
-        start: vi.fn().mockResolvedValue(undefined),
-        stop: mockStop,
-        clear: mockClear,
-        isScanning: true,
-      };
-
-      // Simulate unmount cleanup
-      if (scanner.isScanning) {
-        await scanner.stop();
-        scanner.clear();
-      }
-
-      expect(mockStop).toHaveBeenCalled();
-      expect(mockClear).toHaveBeenCalled();
     });
   });
 
@@ -262,6 +502,12 @@ describe('Scan System & QR Protocol (F-S1)', () => {
         expect(diag.name).toBe('SecurityError');
         expect(diag.message).toBe('Only secure origins are allowed');
         expect(diag.hint).toMatch(/secure context.*permissions-policy/i);
+      });
+
+      it('correctly parses WatchdogTimeoutError with timeout hint', () => {
+        const diag = parseCameraError('WatchdogTimeoutError: Camera stream was established but delivered no video frames within 8 seconds.');
+        expect(diag.name).toBe('WatchdogTimeoutError');
+        expect(diag.hint).toMatch(/delivered no video frames within 8 seconds/i);
       });
 
       it('correctly parses plain string error messages', () => {

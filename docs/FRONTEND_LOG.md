@@ -1272,3 +1272,95 @@ npm run dev:frontend   # http://localhost:5173
 ### 30-Second Explanation
 
 > Step F-S5 makes the equipment QR scanner rock-solid across field hardware: it eliminates zero-dimension container bugs and StrictMode double-mount collisions; falls back gracefully from ideal rear camera constraints to any available camera on single-lens workstations; provides plain-English troubleshooting advice for all camera errors; introduces an isolated raw `getUserMedia` test harness; and fixes the maintenance workflow so work orders correctly distinguish repairs from engineering modifications.
+
+---
+
+## F-S6 — Replacement of html5-qrcode with Custom Native getUserMedia Scanner & jsQR Engine
+
+**Date:** 2026-11-10  
+**Status:** ✅ Complete
+
+---
+
+### What Was Built / Changed
+
+| File | Purpose |
+|---|---|
+| `frontend/src/utils/qrDecoder.ts` | Pure QR decoding module: `decodeFrame()` powered by `jsQR` with zero DOM dependencies, and `computeScaledDimensions()` downscaling video frames to max 640px wide preserving aspect ratio. |
+| `frontend/src/utils/scannerEngine.ts` | Lightweight native WebRTC scanner state machine (`ScannerEngine`): 4 guarded states (`idle`, `starting`, `running`, `stopping`), monotonic session token cancellation, 8-second frame watchdog timer, throttled 5–8 fps RAF decode loop, and 3-second code debounce with haptic vibration feedback. |
+| `frontend/src/components/CameraScanner.tsx` | Replaced `html5-qrcode` DOM container with native `<video playsInline muted autoPlay>` element binding, integrated `ScannerEngine`, added document visibility listeners (pause on tab hidden, resume on visible), and wired working single-click Retry control. |
+| `frontend/src/pages/shared/ScanPage.tsx` | Completely removed `html5-qrcode` and `CameraDevice` imports; updated `?debug=1` diagnostic panel to query native `navigator.mediaDevices.enumerateDevices()` filtered by `kind === 'videoinput'`. |
+| `frontend/src/utils/cameraErrors.ts` | Added `WatchdogTimeoutError` diagnostic mapping informing users when camera streams stall or fail to deliver frames within 8 seconds. |
+| `frontend/package.json` | Uninstalled `html5-qrcode`, installed `jsqr` as dependency, and added `qrcode`, `pngjs`, `@types/qrcode`, and `@types/pngjs` to devDependencies. |
+| `frontend/src/__tests__/scan.test.ts` | Added pure `decodeFrame()` tests against real QR PNGs generated via `qrcode` and parsed via `pngjs`, plus state machine unit tests covering `start twice` (idempotent), `stop while starting`, `retry while starting`, `unmount cleanup`, and `watchdog timeout`. |
+| `docs/decisions/019-custom-getusermedia-scanner-with-jsqr.md` | Authored ADR 019 detailing the root cause of `html5-qrcode` transition deadlocks, alternatives evaluated, and the native `jsQR` solution. |
+| `README.md` | Linked ADR 019 in Architectural Decision Records index. |
+| `docs/CAMERA_DEBUG.md` | Documented full investigation, root causes, and verification of the `html5-qrcode` deadlock resolution. |
+| `docs/DEMO.md` | Added comprehensive QR scanner live demonstration guide and manual entry fallback walkthrough. |
+
+---
+
+### Why — Key Design Decisions
+
+#### 1. Root Cause of `html5-qrcode` Deadlock
+**Problem:** On Android Chrome and laptop webcams, `html5-qrcode` threw `"Cannot transition to a new state, already under transition"` and caused the UI Retry button to hang indefinitely. Meanwhile, the raw `getUserMedia` test page (`/staff/camera-test`) ran without issues on the exact same devices.  
+**Cause:** `html5-qrcode` uses an un-cancelable monolithic state machine with private state flags. Rapid React 18 mounts/unmounts or user retries trigger concurrent state transitions that deadlock the library.  
+**Decision:** Completely remove `html5-qrcode` and implement a clean, in-house scanner engine with an explicit guarded state machine and monotonic session tokens.
+
+#### 2. Why `jsQR` instead of Alternatives
+- **Pinning/Patching `html5-qrcode`**: Rejected because state deadlocks are endemic to its internal promise architecture.
+- **Native `BarcodeDetector`**: Rejected because it is **unsupported on iOS Safari / WebKit** without experimental flags.
+- **`@zxing/browser`**: Rejected due to 450KB bundle size bloat and high memory footprint.
+- **`jsQR`**: Chosen. Lightweight (~40KB), zero-DOM dependencies, fast CPU decoding. Crucially, `jsQR` is already our trusted QR decoder in backend integration tests (`backend/src/__tests__/labels.test.ts`).
+
+#### 3. Single Guarded Lifecycle State Machine
+**Decision:** `ScannerEngine` manages 4 discrete states: `idle`, `starting`, `running`, `stopping`.  
+**Why:**
+- Calling `start()` while running or starting is idempotent.
+- Every startup assigns a `sessionId`. If `stop()` or `retry()` is called while `getUserMedia` is resolving, the returned stream's tracks are immediately stopped upon arrival and discarded.
+- This guarantees zero leaked tracks and complete immunity against React 18 StrictMode double-mount collisions.
+
+#### 4. Throttled Offscreen Canvas & Max 640px Scaling
+**Decision:** The decoding loop runs on `requestAnimationFrame` throttled to **5–8 fps** (~140ms interval) with an offscreen canvas capped at **640px width** (`willReadFrequently: true`).  
+**Why:** Decoding full 1080p camera frames at 60fps causes severe mobile CPU overheating and battery drain. A 640px scaled frame provides optimal QR matrix contrast while consuming minimal processing power.
+
+#### 5. 8-Second Frame Watchdog
+**Decision:** If a stream connects but no video frames arrive within 8 seconds (e.g. frozen camera driver), `WatchdogTimeoutError` is raised.  
+**Why:** Replaces infinite loading spinners with a fail-fast diagnostic card and a working Retry button.
+
+#### 6. Bundle Size Optimization
+**Result:** Removing `html5-qrcode` decreased client bundle size from **780 kB down to 577 kB** (~200 kB / 26% reduction).
+
+---
+
+### How to Test F-S6
+
+**1. Automated tests**
+```bash
+npm run test:backend
+# 163/163 passed across all 11 suites (including equipment and labels verification)
+npm run test:frontend
+# 99/99 passed across all 8 suites (including pure decodeFrame and ScannerEngine state machine tests)
+npm run build:frontend
+# Clean Vite production build in 2.2s with 0 errors
+```
+
+**2. Manual testing checklist**
+```bash
+npm run dev:frontend   # http://localhost:5173
+```
+
+| Role | Test Step | Expected Result |
+|---|---|---|
+| Admin / Staff | Navigate to `/admin/scan` or `/staff/scan` | Native `<video>` stream starts smoothly; green status dot shows "Aim at equipment QR tag". |
+| Admin / Staff | Aim camera at printed label QR (e.g. `CRN-50-001`) | Asset resolves in under 20ms; mobile emits brief 50ms haptic vibration pulse. |
+| Admin / Staff | Keep camera aimed at same QR tag | First scan succeeds; subsequent identical scans ignored for 3 seconds. |
+| Admin / Staff | Switch tabs or minimize browser | Camera stops immediately to save battery; switching back resumes stream cleanly. |
+| Admin / Staff | Append `?debug=1` to URL | Diagnostic HUD lists enumerated video devices via native `enumerateDevices()`. |
+| Admin / Staff | Enter `GEN-250-001` in Manual Lookup | Machine resolves instantly from offline IndexedDB snapshot first, then checks live API. |
+
+---
+
+### 30-Second Explanation
+
+> Step F-S6 replaces the brittle third-party `html5-qrcode` library with our own lightweight native scanner built directly on WebRTC `getUserMedia` and `jsQR`. This eliminates state transition deadlocks and Retry freezes on mobile browsers; reduces bundle size by ~200 kB; introduces a guarded 4-state lifecycle safe under React StrictMode; throttles decoding to 5–8 fps to save mobile battery; adds an 8-second frame watchdog timer; and provides comprehensive automated unit tests for both pure QR decoding and WebRTC state transitions.
