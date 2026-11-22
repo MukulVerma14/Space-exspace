@@ -201,12 +201,80 @@ The platform includes a native, lightweight QR code scanner built on WebRTC `get
 
 ---
 
-## 4. Automated Test Verification
+## 4. PWA Service Worker Update Flow & Pre-Demo Cache Clearing
 
-All offline capabilities, idempotency guarantees, QR decoding pipelines, and edge cases are verified through automated integration tests:
+The web application is a Progressive Web Application (PWA) with client-side Workbox asset precaching. To ensure operators, administrators, and field staff never get stuck on an old client build after new features or routes (such as commercial invoices) are deployed, the application implements a visible, deterministic update lifecycle.
+
+### 4.1 Visible PWA Update Flow ("New version available, refresh")
+
+1. **Background Service Worker Detection**:
+   - `vite-plugin-pwa` is configured with `registerType: 'prompt'`.
+   - When a new build is deployed and accessed, the browser installs the updated service worker in the background. Rather than silently taking over or causing asset version mismatches mid-session, the new service worker pauses in the standard Workbox `waiting` state.
+2. **Prominent Update Banner**:
+   - The `<PwaUpdateBanner />` component listens via `useRegisterSW()` from `virtual:pwa-register/react`.
+   - Once a waiting service worker is detected, an alert banner appears at the top of the viewport:
+     ```
+     [🔄] New version available, refresh               [Refresh Now]  [✕]
+     ```
+3. **One-Click Activation (`skipWaiting`)**:
+   - Clicking **"Refresh Now"** triggers `updateServiceWorker(true)`, which sends a `{ type: 'SKIP_WAITING' }` message to the waiting service worker.
+   - The new service worker immediately activates, claims clients via `clients.claim()`, triggers the `controlling` event handler, and reloads the browser tab.
+   - The user seamlessly transitions to the newest application bundle with zero stale cache lock-in.
+
+---
+
+### 4.2 How to Force-Clear Cache Before a Demo
+
+Before conducting a live stakeholder demonstration, you should purge previous browser cache, unregister stale service workers, and wipe local storage so the application starts from a known, pristine state.
+
+#### Method 1: Chrome / Edge DevTools "Clear site data" (Recommended)
+1. Open Developer Tools: Press `F12` or `Ctrl + Shift + I` (`Cmd + Option + I` on macOS).
+2. Click the **Application** tab in DevTools (if not visible, click the `>>` overflow menu).
+3. In the left navigation tree, click **Storage**.
+4. Check the box for **"including third-party cookies"** (or verify that **Unregister service workers**, **Storage**, and **Cache storage** checkboxes are enabled).
+5. Click the **"Clear site data"** button.
+6. Refresh the page (`Ctrl + R` or `F5`).
+
+```
++---------------------------------------------------------------------------------+
+| Application  >  Storage                                                         |
++---------------------------------------------------------------------------------+
+| Usage: 0 B used                                                                 |
+|                                                                                 |
+| [ Clear site data ]                                                             |
+|                                                                                 |
+| Application                                                                     |
+|  [x] Unregister service workers                                                 |
+| Storage                                                                         |
+|  [x] Local and session storage                                                  |
+|  [x] IndexedDB                                                                  |
+|  [x] Web SQL                                                                    |
+|  [x] Cookies                                                                    |
+| Cache                                                                           |
+|  [x] Cache storage                                                              |
++---------------------------------------------------------------------------------+
+```
+
+#### Method 2: Manual Service Worker Unregistration & "Update on reload"
+1. In DevTools, go to **Application** > **Service Workers** (under the "Application" category in the left sidebar).
+2. Check the box **"Update on reload"** — this forces the browser to check for and activate service worker changes on every navigation during testing.
+3. Click **"Unregister"** next to the active `sw.js` registration.
+4. Hard-refresh the page (`Ctrl + F5` or `Ctrl + Shift + R`).
+
+#### Method 3: Hard Refresh & Cache Bypass
+1. In DevTools, click the **Network** tab.
+2. Check the **"Disable cache"** checkbox (remains active while DevTools is open).
+3. Press `Ctrl + Shift + R` (Windows/Linux) or `Cmd + Shift + R` (macOS).
+4. Alternatively, right-click the browser's Reload icon with DevTools open and select **"Empty Cache and Hard Reload"**.
+
+---
+
+## 5. Automated Test Verification
+
+All offline capabilities, idempotency guarantees, QR decoding pipelines, navigation role guards, and edge cases are verified through automated integration tests:
 
 ```bash
-# Run the complete frontend test suite (99 tests across 8 suites)
+# Run the complete frontend test suite (101 tests across 9 suites)
 npm run test:frontend
 
 # Run the complete backend test suite (163 tests across 11 suites)

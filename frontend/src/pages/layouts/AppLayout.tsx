@@ -1,16 +1,10 @@
 /**
  * AppLayout — persistent shell for all authenticated pages.
  *
- * Contains the top navigation bar with:
- *   - Brand logo + name
- *   - Current user's name + role badge
- *   - Logout button
- *
- * The <Outlet /> renders the current route's page beneath it.
- *
- * WHY NOT SIDEBAR:
- * Mobile-first means the top nav pattern is more ergonomic on phones.
- * A sidebar can be added for desktop breakpoints in a later step.
+ * Contains:
+ *   - Desktop top navigation bar (brand, links, status/outbox badges, user, logout)
+ *   - Mobile bottom navigation bar (ergonomic bottom touch navigation on phones)
+ *   - Outlet rendering current route content
  */
 
 import { useEffect } from 'react';
@@ -73,7 +67,7 @@ export default function AppLayout() {
           </div>
         </NavLink>
 
-        {/* Nav links — only shown on wider screens */}
+        {/* Nav links — shown on wider screens (>= 600px) */}
         <nav
           aria-label="Main navigation"
           style={{
@@ -152,6 +146,25 @@ export default function AppLayout() {
         <Outlet />
       </main>
 
+      {/* ── Mobile Navigation Bar (screens < 600px) ── */}
+      <nav className="mobile-bottom-nav" aria-label="Mobile navigation">
+        <MobileNavItem to={`${homeHref}/scan`} icon="📷" label="Scan" />
+        <MobileNavItem to={`${homeHref}/equipment`} icon="🏗️" label="Fleet" />
+        {user.role === 'admin' && (
+          <>
+            <MobileNavItem to="/admin/rentals" icon="📋" label="Rentals" />
+            <MobileNavItem to="/admin/materials" icon="📦" label="Materials" />
+            <MobileNavItem to="/admin/invoices" icon="🧾" label="Invoices" />
+          </>
+        )}
+        {user.role === 'staff' && (
+          <>
+            <MobileNavItem to="/staff/rentals" icon="📋" label="Rentals" />
+            <MobileNavItem to="/staff/materials" icon="📦" label="Stock" />
+          </>
+        )}
+      </nav>
+
       {/* Responsive nav visibility */}
       <style>{`
         @media (min-width: 480px) {
@@ -161,13 +174,35 @@ export default function AppLayout() {
         }
         @media (min-width: 600px) {
           .top-nav nav a { display: flex !important; }
+          .mobile-bottom-nav { display: none !important; }
+        }
+        @media (max-width: 599px) {
+          .mobile-bottom-nav {
+            display: flex !important;
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 56px;
+            background: rgba(15, 17, 23, 0.96);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-top: 1px solid var(--color-border-subtle);
+            z-index: 99;
+            padding: 0 var(--space-1);
+            align-items: center;
+            justify-content: space-around;
+          }
+          .page-content {
+            padding-bottom: calc(var(--space-16) + env(safe-area-inset-bottom, 0px)) !important;
+          }
         }
       `}</style>
     </div>
   );
 }
 
-// ─── Nav Item ─────────────────────────────────────────────────────────────────
+// ─── Desktop Nav Item ──────────────────────────────────────────────────────────
 
 function NavItem({ to, label }: { to: string; label: string }) {
   return (
@@ -181,11 +216,39 @@ function NavItem({ to, label }: { to: string; label: string }) {
         borderRadius: 'var(--radius-sm)',
         background: isActive ? 'var(--color-primary-glow)' : 'transparent',
         transition: 'all var(--transition-fast)',
-        display: 'none',    /* hidden on mobile, shown via media query below */
+        display: 'none',    /* hidden on mobile, shown via media query above */
       })}
       end
     >
       {label}
+    </NavLink>
+  );
+}
+
+// ─── Mobile Nav Item ───────────────────────────────────────────────────────────
+
+function MobileNavItem({ to, icon, label }: { to: string; icon: string; label: string }) {
+  return (
+    <NavLink
+      to={to}
+      style={({ isActive }) => ({
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flex: 1,
+        padding: '4px 2px',
+        textDecoration: 'none',
+        color: isActive ? '#C8A96F' : '#FFFFF0',
+        fontSize: 'var(--text-xs)',
+        fontWeight: isActive ? 600 : 400,
+        gap: 2,
+        transition: 'color var(--transition-fast)',
+      })}
+      end
+    >
+      <span style={{ fontSize: 18, lineHeight: 1 }} aria-hidden="true">{icon}</span>
+      <span>{label}</span>
     </NavLink>
   );
 }

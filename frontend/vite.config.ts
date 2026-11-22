@@ -28,9 +28,14 @@ export default defineConfig({
      *   F-O2 owns the data snapshot layer (IndexedDB).
      *   Workbox caching API responses leads to stale financial/status data
      *   being shown as "live" — dangerous in an equipment rental context.
+     *
+     * Update flow:
+     *   registerType: 'prompt' ensures new service workers wait in the background
+     *   and fire 'waiting' so a visible "New version available, refresh" banner
+     *   can activate it cleanly via skipWaiting and avoid stale cache lock-in.
      */
     VitePWA({
-      registerType: 'autoUpdate',
+      registerType: 'prompt',
 
       // Workbox options
       workbox: {
