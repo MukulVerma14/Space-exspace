@@ -120,9 +120,9 @@ export default defineConfig({
       },
     },
   },
-
   preview: {
     port: 4173,
+    allowedHosts: ['.trycloudflare.com'],
     headers: {
       'Permissions-Policy': 'camera=(self)',
     },

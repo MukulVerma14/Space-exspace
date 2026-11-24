@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import { isDemoWatermarkEnabled, DEMO_STAMP_HTML } from '../config/demo.js';
 import { z } from 'zod';
 import { pool } from '../db/pool.js';
 import {
@@ -239,7 +240,13 @@ export async function getLabelsSheet(req: Request, res: Response) {
     });
   }
 
-  const html = renderPrintableHtmlGrid(renderedItems);
+  let html = renderPrintableHtmlGrid(renderedItems);
+  if (isDemoWatermarkEnabled()) {
+    // Demo mode: visible DEMO stamp on every printed sheet
+    html = /<body[^>]*>/i.test(html)
+      ? html.replace(/<body([^>]*)>/i, (m) => m + DEMO_STAMP_HTML)
+      : DEMO_STAMP_HTML + html;
+  }
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   return res.status(200).send(html);
 }

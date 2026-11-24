@@ -380,3 +380,58 @@ When selecting production infrastructure for SPACE EXSPACE, we evaluate a **Smal
 
 For day-to-day administrative operations, invoice lifecycle management, and troubleshooting inventory interlocks (such as resolving `Insufficient stock to void invoice` when received goods were already consumed), refer to the:
 - **[Administrator & Operations Guide](ADMIN_GUIDE.md)**
+
+---
+
+## 8. Demo Mode
+
+Demo mode is for a demo server only. It shows a faint "DEMO" watermark on every screen, stamps printed label sheets, blocks search indexing, and can reset the database to the seed data.
+
+### 8.1 Turn demo mode on
+
+| Setting | Where | Value |
+|---|---|---|
+| `DEMO_WATERMARK` | `backend/.env` | `true` (stamps label sheets) |
+| `VITE_DEMO_WATERMARK` | `frontend/.env.production` (or the shell before `vite build`) | `true` (watermark and banner) |
+| `ALLOW_DEMO_SEED` | `backend/.env` | `true` (only if you run the reset) |
+| `DEMO_ADMIN_PASSWORD`, `DEMO_STAFF_PASSWORD` | `backend/.env` | required in production, no fallback |
+
+The frontend flag has a different name because Vite only exposes variables that start with `VITE_`. It is read at build time, so rebuild the frontend after changing it.
+
+### 8.2 Turn demo mode OFF for production
+
+1. In `backend/.env`, set `DEMO_WATERMARK=false` and `ALLOW_DEMO_SEED=false`.
+2. Remove `VITE_DEMO_WATERMARK` from `frontend/.env.production`, then rebuild:
+   ```bash
+   npm --workspace=frontend run build
+   ```
+3. Set real values for `DEMO_ADMIN_PASSWORD` and `DEMO_STAFF_PASSWORD` (or replace the demo accounts with real users), and rotate `JWT_SECRET`.
+4. In the `Caddyfile`, remove the `X-Robots-Tag` header and the `/robots.txt` block if the app should be indexed (not recommended for an internal tool).
+5. Restart the backend and the reverse proxy.
+
+The seed refuses to create accounts with the hardcoded demo passwords when `NODE_ENV=production`, so step 3 is enforced by the code.
+
+### 8.3 Reset the demo database on demand
+
+The reset drops the `public` schema, runs migrations and reloads the seed data. It exits without touching the database unless all of these are true:
+
+- `ALLOW_DEMO_SEED=true`
+- `NODE_ENV` is not `production`
+- `DATABASE_URL` is set
+
+```bash
+ALLOW_DEMO_SEED=true npm --workspace=backend run demo:reset
+```
+
+Never point `DATABASE_URL` at a database that holds real client data.
+
+### 8.4 Nightly reset (cron)
+
+On the demo server, add a cron entry so the demo starts clean every night (02:00):
+
+```cron
+0 2 * * * cd /opt/space-exspace && ALLOW_DEMO_SEED=true NODE_ENV=development npm --workspace=backend run demo:reset >> /var/log/space-exspace-demo-reset.log 2>&1
+```
+
+Check the log after the first run. The last line should say "Demo database reset complete."
+

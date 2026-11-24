@@ -1887,3 +1887,25 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    npm run build:frontend
    ```
    *Expected Result*: Typechecks and Vite builds cleanly with exit code 0.
+
+---
+
+## Demo Mode (DEMO_WATERMARK, Demo Reset, Robots Blocking)
+
+**What we built**
+- A faint diagonal "DEMO - SPACE EXSPACE - NOT FOR PRODUCTION" overlay and a banner on every screen. It is turned on at build time with `VITE_DEMO_WATERMARK=true`.
+- A DEMO stamp on printed label sheets, turned on with `DEMO_WATERMARK=true`.
+- `noindex` in the page head, `X-Robots-Tag` in the Caddyfile, and a `robots.txt` that disallows crawling.
+- A reset script (`npm --workspace=backend run demo:reset`) that wipes and reloads the seed data. It refuses to run unless `ALLOW_DEMO_SEED=true` and `NODE_ENV` is not `production`.
+
+**What we learned**
+- **Vite only exposes `VITE_` variables to the browser.** A flag named `DEMO_WATERMARK` in `backend/.env` cannot reach the frontend. The frontend needs its own build-time flag.
+- **Overlays can break things without looking broken.** `pointer-events: none` stops the overlay blocking taps, and `@media print` hides it, so printed labels and reports stay clean. Both must be checked on a real phone, because a fixed overlay can sit over the camera view.
+- **A reset script is only safe with guards.** The reset drops the whole schema, so it checks three things before running: an explicit opt-in flag, a non-production environment, and a set database URL.
+- **Passwords belong in environment variables, not code.** The seed keeps the dev fallbacks for local work, but throws an error in production if the variables are missing.
+- **Robots blocking needs two layers.** `noindex` in the page stops indexing of the page, and `X-Robots-Tag` in the Caddyfile also covers API responses and files. `robots.txt` only asks crawlers to stay out.
+
+**Still to verify**
+- The overlay and label stamp on a real phone and in print preview.
+- The reset script against a throwaway database, and the cron entry on the demo server.
+
