@@ -29,8 +29,16 @@ export async function seedDatabase() {
     // 1. USERS & ROLES
     // Passwords come from environment variables in production, never hardcoded
     // =========================================================================
-    const adminPassword = process.env.DEMO_ADMIN_PASSWORD || env.DEMO_ADMIN_PASSWORD || 'Admin#2026!Dev';
-    const staffPassword = process.env.DEMO_STAFF_PASSWORD || env.DEMO_STAFF_PASSWORD || 'Staff#2026!Dev';
+    const isProd = process.env.NODE_ENV === 'production';
+    const requirePassword = (value: string | undefined, fallback: string, name: string): string => {
+      if (value) return value;
+      if (isProd) throw new Error(`${name} must be set in production (no hardcoded demo passwords).`);
+      return fallback;
+    };
+    const adminPassword = requirePassword(
+      process.env.DEMO_ADMIN_PASSWORD || env.DEMO_ADMIN_PASSWORD, 'Admin#2026!Dev', 'DEMO_ADMIN_PASSWORD');
+    const staffPassword = requirePassword(
+      process.env.DEMO_STAFF_PASSWORD || env.DEMO_STAFF_PASSWORD, 'Staff#2026!Dev', 'DEMO_STAFF_PASSWORD');
 
     const saltRounds = 10;
     const adminHash = await bcrypt.hash(adminPassword, saltRounds);

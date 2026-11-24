@@ -17,10 +17,17 @@
         X-Frame-Options "SAMEORIGIN"
         # Referrer Policy
         Referrer-Policy "strict-origin-when-cross-origin"
+        # Block search indexing (demo and internal tool)
+        X-Robots-Tag "noindex, nofollow"
         # Camera Permissions-Policy: strictly required for mobile browser QR scanning in Secure Context
         Permissions-Policy "camera=(self)"
         # Hide Caddy server signature
         -Server
+    }
+
+    # Tell crawlers to stay out
+    handle /robots.txt {
+        respond "User-agent: *\nDisallow: /" 200
     }
 
     # Reverse-proxy /api to the backend Express service
