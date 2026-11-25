@@ -1,191 +1,167 @@
-# SPACE EXSPACE — Operations & Yard Management Platform
+# SPACE EXSPACE — Equipment & Materials Tracker
 
-A web-based equipment rental, materials inventory, and yard management application for **SPACE EXSPACE Company**, built to streamline heavy machinery rentals, tracking, workshop maintenance, and field operations with an **offline-first** progressive web app architecture.
+Internal web app for SPACE EXSPACE (Dammam) to track rental equipment (cranes, containers, portable offices, generators), yard moves, repairs, materials stock and invoices. Staff use a phone (QR scanning, moves, returns, repairs), and admins use a laptop (rates, invoices, stock). It works offline and syncs when the connection returns.
 
----
+## Tech stack
 
-## Tech Stack Overview
-
-- **Frontend**: React 18, TypeScript, Vite, Tailwind CSS, Lucide Icons, Dexie.js (IndexedDB).
-- **Backend**: Node.js, Express, TypeScript, `node-postgres` (`pg`), JWT authentication, `decimal.js`.
-- **Database**: PostgreSQL 16+ (using native constraints, append-only audit ledgers, row-level locks, and triggers).
-- **Tooling**: Turborepo workspace, `vitest`, `supertest`, `tsx`.
-
----
+- **Frontend:** React 18, TypeScript, Vite, React Router, `idb` (IndexedDB), `vite-plugin-pwa` (installable offline app), `jsqr` (QR scanning from the camera video)
+- **Backend:** Node.js, Express, TypeScript, PostgreSQL (`pg`), plain SQL migrations (`node-pg-migrate`), JWT auth, `zod`, `decimal.js`, `pino`, `helmet`
+- **Database:** PostgreSQL 16 (Docker)
+- **Tests:** Vitest (backend and frontend)
 
 ## Prerequisites
 
-Before running the application, ensure the following are installed:
-- **Node.js**: v20+ (`node -v`)
-- **npm**: v10+ (`npm -v`)
-- **PostgreSQL**: v16+ (`psql --version` or Docker)
+- Node.js 20+ and npm 10+
+- Docker Desktop (recommended), or a local PostgreSQL 16
 
----
+## First-time setup
 
-## Environment Setup
+Run these from the project root (`E:\Space-exspace` on Windows). The steps are the same on macOS and Linux, except for the environment variable syntax in step 4.
 
-Create `.env` configuration files for both the backend and frontend from their examples:
+1. **Install dependencies**
+   ```bash
+   npm install
+   ```
+
+2. **Create the backend settings file**
+   ```bash
+   cp backend/.env.example backend/.env
+   ```
+   Set `JWT_SECRET` to a long random value. Any random string of 32+ characters works.
+   The database values (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`) must match `docker-compose.yml`.
+
+3. **Start the database**
+   ```bash
+   docker compose up -d
+   ```
+
+4. **Create the tables.** The migration tool reads `DATABASE_URL`, not `backend/.env`, so set it in the same terminal:
+   ```powershell
+   # Windows PowerShell
+   $env:DATABASE_URL="postgres://postgres:postgres@localhost:5432/space_exspace"
+   npm run migrate:backend
+   ```
+   ```bash
+   # macOS / Linux
+   DATABASE_URL=postgres://postgres:postgres@localhost:5432/space_exspace npm run migrate:backend
+   ```
+
+5. **Load the sample data**
+   ```bash
+   npm run seed
+   ```
+
+Sample accounts (development only):
+
+| Role | Email | Password |
+|---|---|---|
+| Admin | `admin@spaceexspace.com` | `Admin#2026!Dev` |
+| Staff | `staff@spaceexspace.com` | `Staff#2026!Dev` |
+
+## Running the app
+
+Use two terminals:
 
 ```bash
-# In the root repository directory:
-cp backend/.env.example backend/.env
-cp frontend/.env.example frontend/.env
-```
-
-Ensure your `backend/.env` has the correct database connection details and secret:
-```env
-PORT=3000
-NODE_ENV=development
-DB_HOST=127.0.0.1
-DB_PORT=5432
-DB_NAME=space_exspace
-DB_USER=postgres
-DB_PASSWORD=postgres
-JWT_SECRET=dev-secret-key-must-be-at-least-32-chars-long-for-security
-JWT_EXPIRES_IN=8h
-CLIENT_URL=http://localhost:5173
-```
-
-Ensure your `frontend/.env` points to the backend API:
-```env
-VITE_API_BASE_URL=http://localhost:3000/api
-```
-
----
-
-## Step-by-Step: How to Run the Whole App
-
-Follow these exact steps from the project root directory:
-
-### Step 1: Install Dependencies
-Install all workspace dependencies across the root, backend, and frontend:
-```bash
-npm install
-```
-
-### Step 2: Database Initialization & Migrations
-Ensure PostgreSQL is running locally or inside Docker on the configured port.
-Run database migrations to initialize tables, constraints, triggers, and append-only audit logs:
-```bash
-npm run migrate:backend
-```
-
-### Step 3: Seed Database with Initial Data
-Seed standard rate cards, test equipment, locations, materials, users, and customer rentals:
-```bash
-npm run seed
-```
-
-> [!NOTE]
-> Seeded accounts for testing:
-> - **Admin**: `admin@spaceexspace.com` / `Admin#2026!Dev`
-> - **Staff**: `staff@spaceexspace.com` / `Staff#2026!Dev`
-
-### Step 4: Run the Backend & Frontend
-
-#### Option A: Run Both Concurrently (Recommended)
-You can start both the backend API server (`localhost:3000`) and Vite frontend (`localhost:5173`) simultaneously using:
-```bash
-npm run dev
-```
-
-#### Option B: Run in Separate Terminals
-
-**Terminal 1 — Backend:**
-```bash
+# Terminal 1: API on http://localhost:3000 (health: /health)
 npm run dev:backend
-```
-*API will start on `http://localhost:3000` with health check at `http://localhost:3000/health`.*
 
-**Terminal 2 — Frontend:**
-```bash
+# Terminal 2: frontend on http://localhost:5173
 npm run dev:frontend
 ```
-*Frontend will start on `http://localhost:5173`.*
 
----
+To test the production build locally:
 
-## Production Build & Verification
-
-### Run Automated Test Suites
-Run all backend unit and integration tests (PostgreSQL integration, role masking, offline sync, ETag caching, concurrency triggers):
-```bash
-npm run test:backend
-```
-
-### Typecheck & Lint
-Validate TypeScript and code style across workspaces:
-```bash
-npm --workspace=backend run lint
-npm --workspace=frontend run typecheck
-```
-
-### Build Frontend
-Compile and bundle the production-ready frontend:
 ```bash
 npm run build:frontend
+cd frontend && npx vite preview      # http://localhost:4173
 ```
 
----
+## Phones and the camera
 
-## Docker Compose Production Setup
-
-To run the complete production-hardened environment including PostgreSQL, Node.js API, Caddy reverse-proxy with automatic HTTPS, and daily encrypted backups:
+Browsers only allow camera access over HTTPS (or `localhost`). To test on a phone, expose the preview server through an HTTPS tunnel, for example:
 
 ```bash
-# 1. Provide production secrets
-cp .env.example .env.prod
-# Update JWT_SECRET, POSTGRES_PASSWORD, RCLONE_CRYPT_PASSWORD, etc.
-
-# 2. Launch production stack
-docker compose -f docker-compose.prod.yml up -d
+cloudflared tunnel --url http://localhost:4173
 ```
 
----
+- `/staff/camera-test` shows the raw camera feed. If it shows video, the camera permission and HTTPS are fine.
+- The **Scan** page reads QR labels and always has a manual asset-code box as a fallback.
+- Tunnel addresses change each time the tunnel restarts.
+- If the phone shows "Blocked request", allow the tunnel host in `vite.config.ts` under `preview.allowedHosts` for the test only, and remove it afterwards.
 
-## Contributing & Git Workflow
+**Status:** QR scanning has been checked on Android and on a laptop webcam, on an earlier build. iPhone has not been tested. Re-test on the current build before any client demo.
 
-- **Branch Push Policy**: All development and automated agent commits must be pushed **ONLY** to the active working branch (`main`). Never push to `origin/Frontend` or other remote branches.
-- **Testing & Verification**: Always run the automated test suite (`npm run test:backend`), linter (`npm --workspace=backend run lint`), and build checks (`npm run build:frontend`) before pushing.
+## Demo mode
 
----
+Demo mode adds a "DEMO" watermark, a banner, a stamp on printed label sheets, and blocks search indexing. It is off by default. Full steps are in [docs/DEPLOY.md](docs/DEPLOY.md) section 8.
 
-## Troubleshooting Common Issues
+- Frontend build: set `VITE_DEMO_WATERMARK=true` in `frontend/.env.production`, then rebuild.
+- Backend: set `DEMO_WATERMARK=true` in `backend/.env` to stamp label sheets.
+- Reset the demo data to the sample data (refuses to run unless `ALLOW_DEMO_SEED=true` and `NODE_ENV` is not `production`):
+  ```bash
+  ALLOW_DEMO_SEED=true npm --workspace=backend run demo:reset
+  ```
 
-### 1. `connect ECONNREFUSED 127.0.0.1:5432` (or `:5433`)
-- **Cause**: The PostgreSQL database server is not running, or your `backend/.env` port does not match your active PostgreSQL instance.
-- **Fix**:
-  1. Check if PostgreSQL is running via Docker (`docker ps`) or local service (`netstat -ano | findstr 5432` / `5433`).
-  2. Start the database service or container (`docker compose up -d postgres`).
-  3. Verify that `DB_PORT` and `DATABASE_URL` in `backend/.env` specify the correct port.
+## Checks
 
-### 2. `ALLOW_DEMO_SEED error` during seed
-- **Cause**: If `NODE_ENV=production` is set, `npm run seed` will fail intentionally to protect production databases.
-- **Fix**: Ensure `NODE_ENV=development` in your local `backend/.env`, or set `ALLOW_DEMO_SEED=true` if explicitly testing a demo in staging.
+```bash
+npm run test:backend                  # needs the database running
+npm run test:frontend
+npm run build:frontend                # type-checks and builds the frontend
+npm --workspace=backend run lint      # backend type-check
+```
 
-### 3. API Requests Fail from Frontend (`Network Error`)
-- **Cause**: The backend API server is not running on port 3000.
-- **Fix**: Start the backend with `npm run dev:backend`.
+**Known failing tests:** 2 frontend tests in `frontend/src/__tests__/equipmentDetail.test.ts` (F-S2) fail on the current build. They need fixing before release.
 
----
+## Production
 
-## Architectural Decision Records (ADRs)
-- [ADR 001: Plain SQL Migrations and No ORM](docs/decisions/001-no-orm-and-sql-migrations.md)
-- [ADR 002: Derived Equipment Status and Append-Only Ledgers](docs/decisions/002-derived-equipment-status-and-append-only-ledgers.md)
-- [ADR 003: Idempotent Seed Strategy and Credential Security](docs/decisions/003-idempotent-seed-strategy-and-credential-security.md)
-- [ADR 004: Quotation Lifecycle, Cancellation Item Freeing, and Future Booking Overlap Scope](docs/decisions/004-quotation-lifecycle-and-booking-overlap-scope.md)
-- [ADR 014: Plain Text QR Code Payload vs URLs](docs/decisions/014-plain-text-qr-payload.md)
-- [ADR 015: Client-Side Encrypted Off-Site Backups and Lifecycle Retention](docs/decisions/015-client-side-encrypted-backups.md)
-- [ADR 016: Store-Only Issued Customer Invoices, Math Reconciliation Invariants, and Payment State Auditing](docs/decisions/016-store-only-issued-customer-invoices-and-reconciliation.md)
-- [ADR 017: Arbitrary-Precision Decimal Money Math, 4-Decimal Unit Prices, Half-Up Rounding Rule, and Compensating Reversals for Voided Invoices](docs/decisions/017-decimal-money-math-4-decimal-unit-prices-and-compensating-void-reversals.md)
-- [ADR 018: Prototype JWT Storage in LocalStorage, XSS Defenses, and Production Same-Origin HttpOnly Cookie Strategy](docs/decisions/018-prototype-jwt-localstorage-and-production-cookie-strategy.md)
-- [ADR 019: Replacement of html5-qrcode with Custom Native getUserMedia Scanner and jsQR Engine](docs/decisions/019-custom-getusermedia-scanner-with-jsqr.md)
+- Docker Compose production stack: `docker-compose.prod.yml` (Caddy with automatic HTTPS, PostgreSQL, API, daily encrypted backups).
+- Read [docs/DEPLOY.md](docs/DEPLOY.md) before deploying. Set real values for `JWT_SECRET`, `DEMO_ADMIN_PASSWORD` and `DEMO_STAFF_PASSWORD`, and turn demo mode off.
+- In production, the seed refuses to run with the hardcoded sample passwords.
 
-## Documentation & Architecture
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `client password must be a string` during migration | `DATABASE_URL` not set for the migration tool | Set `$env:DATABASE_URL` in the same terminal, then run `npm run migrate:backend` |
+| `ECONNREFUSED 127.0.0.1:5432` | Database not running | `docker compose up -d`, then check `docker ps` |
+| `relation ... does not exist` during seed | Migrations didn't run | Run the migration step first |
+| Seed fails with "must be set in production" | `NODE_ENV=production` without demo passwords | Set `DEMO_ADMIN_PASSWORD` and `DEMO_STAFF_PASSWORD` |
+| `REFUSED:` from `demo:reset` | Guard not met | Set `ALLOW_DEMO_SEED=true`, and make sure `NODE_ENV` is not `production` |
+| "Equipment not found" on labels | Asset code doesn't exist in the database | Use codes from the sample data, such as `CRN-50-001`, `CRN-50-002`, `CRN-50-004` |
+| Camera shows black or an error | Permission, HTTPS, or scanner issue | Check `/staff/camera-test` first, then use manual entry |
+| "Blocked request" on phone | Tunnel host not allowed by Vite preview | Add `preview.allowedHosts` for the tunnel, for the test only |
+
+## Documentation
+
 - [Administrator & Operations Guide](docs/ADMIN_GUIDE.md)
 - [Frontend Guide](frontend/README.md)
-- [Deployment & Operations Guide](docs/DEPLOY.md)
-- [System Architecture & Data Model](docs/ARCHITECTURE.md)
-- [Learning Log & Technical Concepts](docs/LEARNING_LOG.md)
-- [Integration Review Findings](docs/INTEGRATION_REVIEW.md)
-- [Open Questions & Client Ambiguities](docs/OPEN_QUESTIONS.md)
+- [Deployment & Operations Guide](docs/DEPLOY.md) (includes demo mode)
+- [Demo script](docs/DEMO.md)
+- [System architecture & data model](docs/ARCHITECTURE.md)
+- [Learning log](docs/LEARNING_LOG.md)
+- [Integration review](docs/INTEGRATION_REVIEW.md)
+- [Open questions for the client](docs/OPEN_QUESTIONS.md)
+
+### Architecture decision records
+
+- [001: no orm and sql migrations](docs/decisions/001-no-orm-and-sql-migrations.md)
+- [002: derived equipment status and append only ledgers](docs/decisions/002-derived-equipment-status-and-append-only-ledgers.md)
+- [003: idempotent seed strategy and credential security](docs/decisions/003-idempotent-seed-strategy-and-credential-security.md)
+- [004: quotation lifecycle and booking overlap scope](docs/decisions/004-quotation-lifecycle-and-booking-overlap-scope.md)
+- [005: server side rate serialization and jwt auth](docs/decisions/005-server-side-rate-serialization-and-jwt-auth.md)
+- [006: action driven state transitions and qr resolution](docs/decisions/006-action-driven-state-transitions-and-qr-resolution.md)
+- [007: rentals materials and price history](docs/decisions/007-rentals-materials-and-price-history.md)
+- [008: client generated uuids and offline event ordering](docs/decisions/008-client-generated-uuids-and-offline-event-ordering.md)
+- [009: offline conflict policy](docs/decisions/009-offline-conflict-policy.md)
+- [010: role based read snapshots and etag caching](docs/decisions/010-role-based-read-snapshots-and-etag-caching.md)
+- [011: offline client lifecycle and first login dependency](docs/decisions/011-offline-client-lifecycle-and-first-login-dependency.md)
+- [012: plain text qr payload and high error correction](docs/decisions/012-plain-text-qr-payload-and-high-error-correction.md)
+- [013: production deployment readiness and proxy trust](docs/decisions/013-production-deployment-readiness-and-proxy-trust.md)
+- [014: caddy reverse proxy same origin and offsite backup](docs/decisions/014-caddy-reverse-proxy-same-origin-and-offsite-backup.md)
+- [015: client side backup encryption and hsts policy](docs/decisions/015-client-side-backup-encryption-and-hsts-policy.md)
+- [016: store only issued customer invoices and reconciliation](docs/decisions/016-store-only-issued-customer-invoices-and-reconciliation.md)
+- [017: decimal money math 4 decimal unit prices and compensating void reversals](docs/decisions/017-decimal-money-math-4-decimal-unit-prices-and-compensating-void-reversals.md)
+- [018: prototype jwt localstorage and production cookie strategy](docs/decisions/018-prototype-jwt-localstorage-and-production-cookie-strategy.md)
+- [019: custom getusermedia scanner with jsqr](docs/decisions/019-custom-getusermedia-scanner-with-jsqr.md)
