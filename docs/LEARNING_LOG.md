@@ -1964,3 +1964,68 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    npm --workspace=frontend test
    ```
    *Result*: 9 test files passed (**101 / 101 tests passed**).
+
+---
+
+## Step R2: Rental Frontend Implementation (Admin Management, Staff Privacy View, and Offline Fallback)
+
+### What we built:
+- **Rentals Data Layer (`frontend/src/data/rentalsSource.ts`)**:
+  - Full TypeScript data models (`RentalListItem`, `RentalDetail`, `RentalDetailItem`, `CreateRentalPayload`).
+  - Online fetch with automatic snapshot persistence to IndexedDB key `rentals-list`.
+  - Offline fallback to local IndexedDB snapshot or explicit "Internet connection required" error card.
+  - Lifecycle mutation functions (`createRental`, `confirmRental`, `pickupRental`, `cancelRental`).
+  - Rate card integration (`fetchStandardRates`) and unambiguous date formatting (`formatDisplayDate`).
+- **Admin Rentals Page (`frontend/src/pages/admin/AdminRentalsPage.tsx`)**:
+  - Filterable rentals catalog: multi-status pills (`All`, `Quotations`, `Confirmed`, `Picked Up`, `Returned`, `Cancelled`), debounced text search across customer, site, and ID.
+  - Metric summary cards (Total agreements, quotations, confirmed awaiting dispatch, picked up on site, returned).
+  - Side drawer showing full rental details, customer contact person and phone, and equipment line items with agreed rates formatted in SAR.
+  - Direct lifecycle actions: Confirm quotation (verifies availability), Pick Up / Dispatch, and Cancel agreement (releases equipment via DB trigger).
+- **Create Rental Modal (`frontend/src/components/NewRentalModal.tsx`)**:
+  - Searchable customer party picker (`GET /api/parties?role=customer`).
+  - Delivery site picker and date interval selection (`expected_end >= start_date`).
+  - Agreement type selection: `confirmed` (default) vs `quotation`.
+  - Dynamic equipment line item builder: available equipment picker (`v_equipment_current` with `status=available`), auto-prefilled rate card amounts based on model and unit (`daily`, `weekly`, `monthly`, `hourly`), editable applied rates with discount note, and clean 409 conflict handling.
+- **Staff Rentals Page (`frontend/src/pages/staff/StaffRentalsPage.tsx`)**:
+  - Operational view limited strictly to active rentals (`confirmed`, `picked_up`).
+  - STRICT PRIVACY GUARANTEE: Zero money (no rates, costs, or SAR currency) and zero customer contact info rendered in DOM.
+  - Operational details: Rental #, customer name, destination site, status badge, dates, equipment specs.
+  - Yard dispatch action ("Pick Up") allowing staff to dispatch confirmed equipment departing the yard.
+  - Offline resilience: shows cached active rentals with "Cached Snapshot (Offline)" badge.
+- **Router Integration (`frontend/src/router/AppRouter.tsx`)**:
+  - Connected `/admin/rentals` to `AdminRentalsPage`.
+  - Connected `/staff/rentals` to `StaffRentalsPage`.
+- **Automated Frontend Unit & Integration Tests**:
+  - `frontend/src/__tests__/rentalsSource.test.ts`: 13 unit tests for online/offline caching, snapshot fallbacks, mutations, rate fetching, date formatting, and status badges.
+  - `frontend/src/__tests__/rentalsPages.test.tsx`: 6 integration tests verifying Admin dashboard, status filtering, offline banner, staff active rentals rendering, operational dispatch action, and strict privacy assertions proving zero money and zero customer contact info in Staff DOM.
+
+### Why it exists:
+- **Contract Workflow**: Allows administrators to quote or confirm rental contracts with agreed rates, while ensuring machines are available before dispatch.
+- **Yard Operations**: Allows yard workers to quickly check what equipment is assigned to which client site and dispatch departing machinery without exposing commercial billing rates or customer executive contact numbers.
+- **Field Offline Usability**: Ensures both office staff and yard operators can review rental contracts and machine destinations even when internet connectivity drops.
+
+### Why this way:
+- **Client-Side Snapshot Caching (`rentals-list`)**:
+  - Automatically caches the last successful rentals query in IndexedDB. When network fails or the user goes offline, cached records remain instantly browsable with an unambiguous cached snapshot timestamp.
+- **Auto-Prefilling Applied Rates from Standard Rate Cards**:
+  - Pre-fills standard rates based on the chosen model and unit to prevent pricing errors while explicitly recording discounts via `discount_note` when custom rates are negotiated.
+- **Strict Role-Based DOM Separation**:
+  - Staff pages do not merely hide financial elements with CSS; monetary fields and customer contact details are never rendered or queried in the staff interface.
+
+### How to verify:
+1. Run backend tests:
+   ```bash
+   npm --workspace=backend test
+   ```
+   *Result*: 12 test files passed (**171 / 171 tests passed**).
+2. Run frontend tests:
+   ```bash
+   npm --workspace=frontend test
+   ```
+   *Result*: 11 test files passed (**120 / 120 tests passed**).
+3. Build frontend:
+   ```bash
+   npm --workspace=frontend run build
+   ```
+   *Result*: Clean build in 2.4s.
+

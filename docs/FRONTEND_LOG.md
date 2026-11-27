@@ -1364,3 +1364,81 @@ npm run dev:frontend   # http://localhost:5173
 ### 30-Second Explanation
 
 > Step F-S6 replaces the brittle third-party `html5-qrcode` library with our own lightweight native scanner built directly on WebRTC `getUserMedia` and `jsQR`. This eliminates state transition deadlocks and Retry freezes on mobile browsers; reduces bundle size by ~200 kB; introduces a guarded 4-state lifecycle safe under React StrictMode; throttles decoding to 5–8 fps to save mobile battery; adds an 8-second frame watchdog timer; and provides comprehensive automated unit tests for both pure QR decoding and WebRTC state transitions.
+
+---
+
+## F-R2 — Equipment Rentals UI: Admin Lifecycle Management & Staff Privacy-First View
+
+**Date:** 2026-11-27  
+**Status:** ✅ Complete
+
+---
+
+### What Was Built
+
+| File | Purpose |
+|---|---|
+| `frontend/src/data/rentalsSource.ts` | Complete rental types, client API calls (`fetchRentals`, `fetchRentalById`, `createRental`, `confirmRental`, `pickupRental`, `cancelRental`), rate card lookup, IndexedDB `rentals-list` snapshot caching, and unambiguous `formatDisplayDate` (DD MMM YYYY) formatter. |
+| `frontend/src/components/NewRentalModal.tsx` | Admin create rental modal with `SearchablePartyPicker` for customer, delivery site dropdown, date validation (`expected_end >= start_date`), agreement status (`confirmed` vs `quotation`), dynamic line items with available equipment picker, rate card prefill from `GET /api/rates`, editable applied rate, discount note, and friendly conflict (409) handling. |
+| `frontend/src/pages/admin/AdminRentalsPage.tsx` | Full admin rentals dashboard: metric summary cards, status filter pills (`All`, `Quotations`, `Confirmed`, `Picked Up`, `Returned`, `Cancelled`), debounced search, responsive table with quick actions, full-featured detail drawer showing customer contact info and applied rates with currency, quotation confirm, dispatch pickup, and cancellation actions. Offline-resilient with cached snapshot banner. |
+| `frontend/src/pages/staff/StaffRentalsPage.tsx` | Staff rentals view restricted strictly to active operational rentals (`confirmed`, `picked_up`). Invariant enforcement: strictly ZERO money/rates rendered in DOM and ZERO customer contact info (no phone, email, contact person). Operational details only: Rental #, Customer Name, Destination Site, Status, Dates, Equipment items, and yard dispatch / pick up action. Offline-resilient with snapshot banner or explicit "Internet connection required" card. |
+| `frontend/src/router/AppRouter.tsx` | Replaced placeholder rentals routes with `AdminRentalsPage` at `/admin/rentals` and `StaffRentalsPage` at `/staff/rentals`. |
+| `frontend/src/__tests__/rentalsSource.test.ts` | 13 automated unit tests for `rentalsSource` covering online live fetch, IndexedDB snapshot caching, offline snapshot fallback, offline missing cache error, all mutation actions, rate card fetching, date formatters, and badge classes. |
+| `frontend/src/__tests__/rentalsPages.test.tsx` | 6 integration tests verifying Admin rentals rendering, status filtering, snapshot offline banner, "Internet connection required" message, Staff active rentals rendering, operational dispatch action, and strict assertions proving zero money and zero customer contact info in Staff DOM. |
+
+---
+
+### Why — Key Design Decisions
+
+#### 1. Rate Card Prefilling with Explicit Discount Note
+**Decision:** When an equipment item is selected in `NewRentalModal`, the form automatically matches the equipment model and chosen billing unit (`daily`, `weekly`, `monthly`, `hourly`) against the standard commercial rate cards fetched via `GET /api/rates`. The `applied_rate` is prefilled automatically. If the admin edits the applied rate below standard, the UI highlights "(Discount applied)" and offers a discount note field.  
+**Why:** Prevents manual data entry mistakes, aligns with company pricing guidelines, and records an auditable justification for commercial discounts on rental agreements.
+
+#### 2. Dual-Role Privacy Partitioning
+**Decision:** Admin views agreed rates in SAR and customer contact details (phone, contact person). Staff views only operational specs (customer company name, site location, asset code, model) and has strictly ZERO monetary figures or customer personal contact info rendered in their DOM.  
+**Why:** Yard staff and technicians have an operational mission (dispatching machines, checking returns), but no commercial reason to know customer tariff rates or executives' direct contact details. Enforcing this at both the server serializer level and the client DOM level guarantees complete data security.
+
+#### 3. Offline Resiliency with `rentals-list` Snapshot
+**Decision:** When online, rentals fetched by `fetchRentals` are saved to the user's IndexedDB snapshot under key `rentals-list`. When offline, if a snapshot exists, the UI renders the cached list with a clear "Cached Snapshot (Offline)" banner indicating server actions are disabled. If no snapshot exists, the page renders an explicit "Internet connection required to load rentals" message rather than an infinite spinner or empty white screen.  
+**Why:** Fulfills the offline-first requirement for yard staff operating in areas with intermittent Wi-Fi or LTE connectivity.
+
+#### 4. Unambiguous Date Format (DD MMM YYYY)
+**Decision:** Formatted all displayed dates using `formatDisplayDate(isoDateStr)` which produces unambiguous dates like `15 Oct 2026`.  
+**Why:** Avoids ambiguity between US (`MM/DD/YYYY`) and international (`DD/MM/YYYY`) formats, and prevents browser timezone shifts where midnight UTC strings display as the previous day in local browser timezones.
+
+---
+
+### How to Test F-R2
+
+**1. Automated tests**
+```bash
+npm run test:frontend
+# 120/120 passed across all 11 suites (including rentalsSource and rentalsPages)
+npm run test:backend
+# 171/171 passed across all 12 suites
+npm run build:frontend
+# Clean Vite production build with 0 errors
+```
+
+**2. Manual testing checklist**
+```bash
+npm run dev:frontend   # http://localhost:5173
+```
+
+| Role | Test Step | Expected Result |
+|---|---|---|
+| Admin | Navigate to `/admin/rentals` | Displays metric cards, rentals table with status pills, and "+ New Rental" button. |
+| Admin | Click "+ New Rental" | Modal opens with searchable customer picker, site dropdown, date range, available equipment picker, and auto-prefilled rate card. |
+| Admin | Click a Quotation rental row | Drawer opens showing agreed rate in SAR, customer phone, contact person, and "Confirm Agreement" button. |
+| Admin | Click "Confirm Agreement" | Confirms quotation after availability check; status transitions to Confirmed. |
+| Staff | Navigate to `/staff/rentals` | Displays only active rentals (confirmed, picked up). NO money, NO rates, NO currency, and NO customer phone/email anywhere on the page. |
+| Staff | Click "Pick Up / Dispatch" on Confirmed rental | Opens dispatch dialog, confirms equipment movement to client site. |
+| Admin / Staff | Toggle DevTools Offline with cached data | Page displays "Cached Snapshot (Offline)" banner with last saved time; data remains readable. |
+| Admin / Staff | Clear storage and reload while offline | Page displays clear "Internet Connection Required: Internet connection required to load rentals" message. |
+
+---
+
+### 30-Second Explanation
+
+> In Step F-R2, we implemented the frontend rental management workflows: an Admin Rentals dashboard with metric counters, status filtering, quotation confirmation, pickup dispatch, agreement cancellation, and a new rental creation modal that pre-fills standard rate cards and records discounts. For yard staff, the Staff Rentals page provides an operational, privacy-first view of active contracts with dispatch capabilities, strictly omitting all monetary amounts and customer contact info. Both views seamlessly fall back to IndexedDB cached snapshots when offline.
+

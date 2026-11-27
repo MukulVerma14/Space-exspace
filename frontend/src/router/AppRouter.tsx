@@ -5,11 +5,12 @@ import AppLayout from '../pages/layouts/AppLayout';
 import LoginPage from '../pages/LoginPage';
 import AdminHomePage from '../pages/admin/AdminHomePage';
 import StaffHomePage from '../pages/staff/StaffHomePage';
-import PlaceholderPage from '../pages/PlaceholderPage';
 import EquipmentListPage from '../pages/shared/EquipmentListPage';
 import EquipmentDetailPage from '../pages/shared/EquipmentDetailPage';
 import MaterialsPage from '../pages/shared/MaterialsPage';
 import InvoicesPage from '../pages/admin/InvoicesPage';
+import AdminRentalsPage from '../pages/admin/AdminRentalsPage';
+import StaffRentalsPage from '../pages/staff/StaffRentalsPage';
 import ScanPage from '../pages/shared/ScanPage';
 import CameraTestPage from '../pages/shared/CameraTestPage';
 
@@ -49,7 +50,7 @@ const router = createBrowserRouter([
           { path: '/admin/camera-test',             element: <CameraTestPage /> },
           { path: '/admin/equipment',               element: <EquipmentListPage /> },
           { path: '/admin/equipment/:asset_code',   element: <EquipmentDetailPage /> },
-          { path: '/admin/rentals',                 element: <PlaceholderPage title="Rentals" /> },
+          { path: '/admin/rentals',                 element: <AdminRentalsPage /> },
           { path: '/admin/materials',               element: <MaterialsPage /> },
           { path: '/admin/invoices',                element: <InvoicesPage /> },
         ],
@@ -69,7 +70,7 @@ const router = createBrowserRouter([
           { path: '/staff/camera-test',             element: <CameraTestPage /> },
           { path: '/staff/equipment',               element: <EquipmentListPage /> },
           { path: '/staff/equipment/:asset_code',   element: <EquipmentDetailPage /> },
-          { path: '/staff/rentals',                 element: <PlaceholderPage title="Rentals" /> },
+          { path: '/staff/rentals',                 element: <StaffRentalsPage /> },
           { path: '/staff/materials',               element: <MaterialsPage /> },
         ],
       },
