@@ -2029,3 +2029,66 @@ This document records every step of building the SPACE EXSPACE equipment and mat
    ```
    *Result*: Clean build in 2.4s.
 
+
+---
+
+## Step R3: Sensible Rates, Relative Overdue Dates, and Formatting Polish
+
+### What we built:
+1. **Sensible Rate Cards Per Equipment Model (`backend/src/db/seed.ts`)**:
+   - Expanded rate cards so all 12 equipment models have comprehensive standard rates across `daily`, `weekly`, and `monthly` billing intervals (plus `hourly` for mobile cranes).
+   - Applied realistic heavy machinery term discounting: weekly rates are ~4.5x-5x daily (a ~30% discount over 7 days), and monthly rates are ~3.2x-3.8x weekly (a ~20% discount over 30 days).
+   - Rate hierarchy enforced: `daily < weekly < monthly`, `weekly < 7 * daily`, and `monthly < 5 * weekly`.
+2. **Relative Demo Dates with Guaranteed Overdue Returns**:
+   - Replaced static calendar dates with `relativeDate(offsetDays)`.
+   - Seeded exactly two active overdue return agreements:
+     - **Rental #1**: 5 items (`CRN-50-001`, `CRN-50-002`, `GEN-250-001`, `OFF-40-001`, `WSH-04-001`), `status: 'picked_up'`, started 25 days ago, scheduled return 5 days ago (5 days overdue).
+     - **Rental #3**: 2 items (`CRN-35-002`, `CNT-40-003`), `status: 'picked_up'`, started 12 days ago, scheduled return 2 days ago (2 days overdue).
+     - **Rental #2**: 1 item (`CRN-35-001`), `status: 'returned'`, started 45 days ago, returned 15 days ago.
+   - Preserved the seed and fleet invariant of exactly 7 active rented equipment units (`5 + 2 = 7`).
+3. **Frontend Overdue Tracking & Metrics**:
+   - Helper functions `isRentalOverdue(expectedEnd, status, refDate)` and `getDaysOverdue(expectedEnd, refDate)`.
+   - "Overdue Returns" summary metric cards on both Admin and Staff rental views.
+   - Dedicated `Overdue` filter pill on Admin and Staff tabs.
+   - Red visual warnings (`⚠️ DD MMM YYYY (Xd overdue)`) on table rows and red overdue return notification alerts in the detail drawer.
+4. **Unambiguous Date Formatting (`DD MMM YYYY`)**:
+   - Standardized all application date displays (`AdminHomePage`, `EquipmentDetailPage`, `InvoicesPage`, `MaterialsPage`, `AdminRentalsPage`, `StaffRentalsPage`) using `formatDisplayDate(isoDateStr)` which renders dates like `20 Oct 2026`.
+   - Eliminates ambiguity between US (`MM/DD/YYYY`) and international (`DD/MM/YYYY`) dates.
+   - Eliminates browser timezone offsets where midnight UTC strings shift backward by a day in local client timezones.
+5. **Human-Readable Status and Unit Labels**:
+   - Human-readable unit formatting: `formatRateUnitLabel(unit)` (`/ day`, `/ week`, `/ month`, `/ hour`) and `getHumanReadableUnit(unit)` (`Daily`, `Weekly`, `Monthly`, `Hourly`).
+   - Human-readable status badges: `getRentalStatusLabel(status, isOverdue)` and `getRentalStatusBadgeClass(status, isOverdue)`.
+6. **Automated Unit & Integration Verification**:
+   - `backend/src/__tests__/seed.test.ts`: Added tests verifying all 12 models have daily/weekly/monthly rate cards with sensible discounts and verifying demo dates produce exactly two overdue returns relative to current date (173/173 tests passing).
+   - `frontend/src/__tests__/rentalsSource.test.ts`: 18 tests covering date formatting, unit formatting, and overdue logic.
+   - `frontend/src/__tests__/rentalsPages.test.tsx`: 6 integration tests verifying Admin and Staff overdue rendering, metrics, and privacy invariants (125/125 tests passing).
+
+### Why it exists:
+- **Commercial Realism**: Fleet rental contracts require multi-tier rate structures. Having complete daily, weekly, and monthly rates for every model allows seamless creation of quotations and contracts at appropriate billing cadences without missing rate card errors.
+- **Repeatable Demonstration**: In hardcoded seed fixtures, demo dates become outdated as time progresses. Relative date generation ensures that regardless of when a demo or test is executed, the database reliably contains active overdue agreements to demonstrate overdue return alerting and operational dispatch.
+- **Data Precision & Zero Misinterpretation**: Numeric date formats like `04/05/2026` risk operational misinterpretation between April 5 and May 4. Using unambiguous 3-letter month abbreviations (`05 Apr 2026`) guarantees clarity across international teams.
+
+### Why this way:
+- **Relative Date Calculation in Seed Fixtures**:
+  - Computing dates relative to `new Date()` ensures seed data never becomes stale or expires.
+- **Pure String Date Parsing (`formatDisplayDate`)**:
+  - Rather than passing ISO strings to `new Date(str).toLocaleDateString()`, which parses UTC midnights into local timezones (often shifting dates by -1 day in Western timezones), `formatDisplayDate` directly extracts the year, month, and day components, guaranteeing deterministic date rendering on any client device.
+- **Derived Overdue State**:
+  - Overdue status is computed dynamically from `expected_end < today` for active contracts (`confirmed`, `picked_up`) rather than storing a mutable `is_overdue` boolean in the database that would require continuous background cron jobs to update.
+
+### How to verify:
+1. Run backend tests:
+   ```bash
+   npm --workspace=backend test
+   ```
+   *Result*: 12 test files passed (**173 / 173 tests passed**).
+2. Run frontend tests:
+   ```bash
+   npm --workspace=frontend test
+   ```
+   *Result*: 11 test files passed (**125 / 125 tests passed**).
+3. Build frontend bundle:
+   ```bash
+   npm --workspace=frontend run build
+   ```
+   *Result*: Clean Vite PWA production build in 5.2s.

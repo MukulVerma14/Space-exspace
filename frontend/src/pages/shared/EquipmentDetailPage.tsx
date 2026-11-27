@@ -36,6 +36,7 @@ import {
   DataSource,
 } from '../../data/equipmentSource';
 import { EquipmentStatus, EquipmentCondition } from '../../data/equipmentSource';
+import { formatDisplayDate, formatRateUnitLabel, getRentalStatusLabel } from '../../data/rentalsSource';
 
 const STATUS_LABELS: Record<EquipmentStatus, string> = {
   available: 'Available',
@@ -641,7 +642,7 @@ export default function EquipmentDetailPage() {
               Last Relocated
             </div>
             <div style={{ fontWeight: 500, fontSize: 'var(--text-sm)', marginTop: 2 }}>
-              {equipment.last_moved_at ? new Date(equipment.last_moved_at).toLocaleDateString() : '—'}
+              {formatDisplayDate(equipment.last_moved_at)}
             </div>
             {equipment.last_moved_by_name && (
               <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-subtle)' }}>
@@ -660,7 +661,7 @@ export default function EquipmentDetailPage() {
               <span>📋</span> Active Rental Agreement
             </h2>
             <span className="badge badge-rented" style={{ textTransform: 'capitalize' }}>
-              {equipment.active_rental.rental_status}
+              {getRentalStatusLabel(equipment.active_rental.rental_status)}
             </span>
           </div>
 
@@ -694,8 +695,8 @@ export default function EquipmentDetailPage() {
             <div>
               <div style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-xs)' }}>Rental Period</div>
               <div style={{ fontWeight: 500 }}>
-                {new Date(equipment.active_rental.start_date).toLocaleDateString()} →{' '}
-                {new Date(equipment.active_rental.expected_end).toLocaleDateString()}
+                {formatDisplayDate(equipment.active_rental.start_date)} →{' '}
+                {formatDisplayDate(equipment.active_rental.expected_end)}
               </div>
             </div>
 
@@ -704,7 +705,7 @@ export default function EquipmentDetailPage() {
               <div id="rental-admin-rate-section">
                 <div style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-xs)' }}>Agreed Rate (Admin)</div>
                 <div style={{ fontWeight: 700, color: 'var(--color-primary)', fontSize: 'var(--text-base)' }}>
-                  {Number(equipment.active_rental.applied_rate).toFixed(2)} SAR / {equipment.active_rental.rate_unit || 'day'}
+                  {Number(equipment.active_rental.applied_rate).toFixed(2)} SAR {formatRateUnitLabel(equipment.active_rental.rate_unit)}
                 </div>
                 {equipment.active_rental.discount_note && (
                   <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-subtle)' }}>
@@ -743,7 +744,7 @@ export default function EquipmentDetailPage() {
             }}
           >
             <div>
-              Opened: <strong>{new Date(equipment.open_maintenance.opened_at).toLocaleDateString()}</strong>
+              Opened: <strong>{formatDisplayDate(equipment.open_maintenance.opened_at)}</strong>
             </div>
             <div>
               Reported By: <strong>{equipment.open_maintenance.reported_by_name}</strong>
@@ -786,7 +787,7 @@ export default function EquipmentDetailPage() {
                       {rate.vat_included ? 'VAT Included' : '+15% VAT'}
                     </td>
                     <td style={{ padding: 'var(--space-2) var(--space-3)', color: 'var(--color-text-muted)' }}>
-                      {new Date(rate.valid_from).toLocaleDateString()}
+                      {formatDisplayDate(rate.valid_from)}
                     </td>
                   </tr>
                 ))}

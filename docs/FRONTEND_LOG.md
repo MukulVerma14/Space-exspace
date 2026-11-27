@@ -1442,3 +1442,83 @@ npm run dev:frontend   # http://localhost:5173
 
 > In Step F-R2, we implemented the frontend rental management workflows: an Admin Rentals dashboard with metric counters, status filtering, quotation confirmation, pickup dispatch, agreement cancellation, and a new rental creation modal that pre-fills standard rate cards and records discounts. For yard staff, the Staff Rentals page provides an operational, privacy-first view of active contracts with dispatch capabilities, strictly omitting all monetary amounts and customer contact info. Both views seamlessly fall back to IndexedDB cached snapshots when offline.
 
+
+---
+
+## F-R3 — Rental Seed & Polish: Sensible Rate Cards, Relative Overdue Dates, Unambiguous Date Format, and Status/Unit Labels
+
+**Date:** 2026-11-27  
+**Status:** ✅ Complete
+
+---
+
+### What Was Built
+
+| File | Purpose |
+|---|---|
+| `backend/src/db/seed.ts` | Expanded rate cards so all 12 equipment models have sensible `daily`, `weekly`, and `monthly` rental rates (with `hourly` for cranes) reflecting standard industrial discounting (~4.5x-5x daily for weekly, ~3.2x-3.8x weekly for monthly). Replaced hardcoded rental dates with dynamic `relativeDate(offsetDays)` generating exactly two overdue active returns (`CRN-50-001`, `CRN-50-002`, `GEN-250-001`, `OFF-40-001`, `WSH-04-001` in Rental 1 overdue by 5 days, and `CRN-35-002`, `CNT-40-003` in Rental 3 overdue by 2 days) while preserving the fleet status invariant of 7 active rented items. |
+| `backend/src/__tests__/seed.test.ts` | Added unit tests verifying all 12 models have complete daily/weekly/monthly rate hierarchies with volume discounting (`daily < weekly < monthly`, `weekly < 7 * daily`, `monthly < 5 * weekly`), and verifying relative demo dates generate exactly two overdue returns. |
+| `frontend/src/data/rentalsSource.ts` | Added `isRentalOverdue(expectedEnd, status, refDate)`, `getDaysOverdue(expectedEnd, refDate)`, `formatRateUnitLabel(unit)` (`/ day`, `/ week`, `/ month`, `/ hour`), `getHumanReadableUnit(unit)` (`Daily`, `Weekly`, `Monthly`, `Hourly`), and updated `getRentalStatusLabel` and `getRentalStatusBadgeClass` with overdue support. |
+| `frontend/src/pages/admin/AdminRentalsPage.tsx` | Added "Overdue Returns" metric card with count badge, `Overdue` filter pill (`⚠️ Overdue (X)`), red highlighting with `⚠️ DD MMM YYYY (Xd overdue)` in the table rows, and an overdue return warning alert banner in the rental detail drawer. Formats rate units using `formatRateUnitLabel`. |
+| `frontend/src/pages/staff/StaffRentalsPage.tsx` | Added "Overdue Returns" metric card and `Overdue` filter tab. Displays `⚠️ DD MMM YYYY (Overdue)` warning and `⚠️ Overdue Return` badge in table rows and detail drawer, while strictly preserving zero-money and zero-customer-contact privacy invariants. |
+| `frontend/src/pages/admin/AdminHomePage.tsx` | Replaced raw `toLocaleDateString()` with unambiguous `formatDisplayDate(item.expected_end)` (`DD MMM YYYY`). |
+| `frontend/src/pages/shared/EquipmentDetailPage.tsx` | Replaced raw date formatting for `last_moved_at`, `start_date`, `expected_end`, `opened_at`, and `valid_from` with `formatDisplayDate`. Integrated `formatRateUnitLabel` and `getRentalStatusLabel`. |
+| `frontend/src/pages/admin/InvoicesPage.tsx` | Replaced raw `toLocaleDateString()` with `formatDisplayDate` for invoice dates, period start/end, due dates, and paid dates. |
+| `frontend/src/pages/shared/MaterialsPage.tsx` | Replaced raw `toLocaleDateString()` with `formatDisplayDate` across stock movement log and price history tables. |
+| `frontend/src/__tests__/rentalsSource.test.ts` | Added automated unit tests for `isRentalOverdue`, `getDaysOverdue`, `formatRateUnitLabel`, `getHumanReadableUnit`, and overdue status label/badge functions (18 tests passing). |
+| `frontend/src/__tests__/rentalsPages.test.tsx` | Added integration tests verifying overdue metric cards, filter pills, and warning badges across both Admin and Staff pages (6 tests passing). |
+
+---
+
+### Why — Key Design Decisions
+
+#### 1. Sensible Tiered Rate Card Matrix
+**Decision:** Configured standard commercial pricing across all 12 equipment models for `daily`, `weekly`, and `monthly` terms. Cranes also include `hourly` rates. Weekly rates represent approximately 4.5 to 5 days of daily rates (a ~30% discount over 7 days), and monthly rates represent approximately 3.2 to 3.8 weekly rates (a ~20% discount over 30 days).  
+**Why:** Heavy industrial equipment rentals follow progressive term discounting. Having full rate cards for all models ensures the Admin Rental creation modal can auto-fill valid rates regardless of which model or billing period is chosen.
+
+#### 2. Relative Demo Dates & Guaranteed Overdue Returns
+**Decision:** Generated rental dates dynamically relative to current execution date using `relativeDate(offsetDays)`. Rental 1 is set to 25 days ago with expected end 5 days ago (5 days overdue); Rental 3 is set to 12 days ago with expected end 2 days ago (2 days overdue). Rental 2 is set in the past and returned.  
+**Why:** Hardcoded demo dates (e.g. `2026-10-31`) inevitably age and become obsolete. Relative date generation guarantees that whenever the demo database is seeded, two active rentals are immediately and reliably overdue, providing a turnkey demonstration of the overdue returns filter and operational alerts without manual database manipulation.
+
+#### 3. Unambiguous Date Format (`DD MMM YYYY`) Across All Views
+**Decision:** Consolidated all date rendering in the frontend to `formatDisplayDate(isoDateStr)` which renders dates like `05 Nov 2026`.  
+**Why:** Numeric dates like `05/11/2026` cause severe confusion between US (`May 11`) and international (`Nov 5`) conventions. Furthermore, standard JavaScript `new Date("2026-11-05").toLocaleDateString()` shifts dates backward by one day in timezones west of UTC due to midnight UTC parsing. `formatDisplayDate` parses the year, month, and day strings directly, eliminating all timezone shift bugs.
+
+#### 4. Human-Readable Status and Billing Unit Labels
+**Decision:** Converted snake_case database identifiers into human-friendly capitalized text (`daily` → `/ day`, `weekly` → `/ week`, `monthly` → `/ month`, `picked_up` → `Picked Up`, `confirmed` → `Confirmed`). Overdue active agreements are cleanly tagged with `⚠️ Overdue (Xd overdue)` badges.  
+**Why:** Operations directors and yard workers need clean, unambiguous status indicators that immediately signal operational urgency without cognitive translation of backend enum values.
+
+---
+
+### How to Test F-R3
+
+**1. Automated tests**
+```bash
+npm --workspace=frontend test
+# 125/125 passed across all 11 test suites
+npm --workspace=backend test
+# 173/173 passed across all 12 test suites
+npm --workspace=frontend run build
+# Clean Vite PWA production build (0 errors)
+```
+
+**2. Manual testing checklist**
+```bash
+npm run seed             # Seeds fresh demo database with relative dates
+npm run dev:frontend     # http://localhost:5173
+```
+
+| Role | Test Step | Expected Result |
+|---|---|---|
+| Admin | Navigate to `/admin/rentals` | "Overdue Returns" metric card displays count of 2. Filter pill `⚠️ Overdue (2)` is present. |
+| Admin | Click `⚠️ Overdue (2)` filter pill | Table filters down to Rental #1 (5d overdue) and Rental #3 (2d overdue). Expected Return column shows red warning `⚠️ DD MMM YYYY (Xd overdue)`. |
+| Admin | Click an overdue rental row | Detail drawer opens with red warning banner: `⚠️ Overdue Return Notice: This rental agreement is X days past its scheduled return date.` |
+| Admin | Click "+ New Rental" | Choose any equipment model: rate card dropdown offers sensible Daily, Weekly, and Monthly rates with auto-prefilled amounts. |
+| Staff | Navigate to `/staff/rentals` | "Overdue Returns" metric card displays 2. Overdue rows show `⚠️ DD MMM YYYY (Overdue)` and `⚠️ Overdue Return` badge. Zero money and zero customer contact info rendered in DOM. |
+| Admin / Staff | Navigate across `/admin/equipment/:code`, `/admin/invoices`, `/admin/materials` | All dates render in unambiguous `DD MMM YYYY` format (e.g. `15 Oct 2026`). |
+
+---
+
+### 30-Second Explanation
+
+> In Step F-R3, we delivered polish across data, presentation, and seed fixtures. Every equipment model now has a complete commercial rate card with realistic term discounts across daily, weekly, and monthly units. Demo dates are generated relative to today's date, guaranteeing exactly two overdue active returns for live demonstration. All dates across admin and staff views now render in unambiguous DD MMM YYYY format, eliminating timezone shifts and date-order ambiguity, while status and rate units display clean human-readable labels with clear overdue warning indicators.

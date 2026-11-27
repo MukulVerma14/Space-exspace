@@ -23,6 +23,7 @@ import {
   OverdueReturnItem,
 } from '../../data/dashboardSource';
 import { MaterialItem } from '../../data/materialsSource';
+import { formatDisplayDate } from '../../data/rentalsSource';
 
 export default function AdminHomePage() {
   const { user } = useAuth();
@@ -501,7 +502,7 @@ export default function AdminHomePage() {
                       </td>
                       <td style={{ padding: 'var(--space-2) var(--space-3)', whiteSpace: 'nowrap' }}>
                         <div style={{ fontWeight: 600, color: 'var(--color-danger)' }}>
-                          {new Date(item.expected_end).toLocaleDateString()}
+                          {formatDisplayDate(item.expected_end)}
                         </div>
                         <span
                           style={{

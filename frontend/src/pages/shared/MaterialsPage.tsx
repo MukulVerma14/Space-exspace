@@ -22,6 +22,7 @@ import {
   fetchMaterialMovements,
   formatMoney,
 } from '../../data/materialsSource';
+import { formatDisplayDate } from '../../data/rentalsSource';
 
 export default function MaterialsPage() {
   const { user } = useAuth();
@@ -662,7 +663,7 @@ export default function MaterialsPage() {
                             {priceHistory.price_history.map((rec, idx) => (
                               <tr key={`${rec.invoice_id}-${rec.line_no}-${idx}`} style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
                                 <td style={{ padding: 'var(--space-2) var(--space-3)', whiteSpace: 'nowrap' }}>
-                                  {new Date(rec.invoice_date).toLocaleDateString()}
+                                  {formatDisplayDate(rec.invoice_date)}
                                 </td>
                                 <td style={{ padding: 'var(--space-2) var(--space-3)', fontFamily: 'var(--font-mono)', fontWeight: 600 }}>
                                   {rec.invoice_no}
@@ -719,7 +720,7 @@ export default function MaterialsPage() {
                             return (
                               <tr key={mov.id} style={{ borderBottom: '1px solid var(--color-border-subtle)' }}>
                                 <td style={{ padding: 'var(--space-2) var(--space-3)', whiteSpace: 'nowrap' }}>
-                                  {new Date(mov.moved_at).toLocaleDateString()}
+                                  {formatDisplayDate(mov.moved_at)}
                                 </td>
                                 <td style={{ padding: 'var(--space-2) var(--space-3)' }}>
                                   <span

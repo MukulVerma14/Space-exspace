@@ -80,7 +80,56 @@ describe('Idempotent Database Seed Suite', () => {
     );
     const units = ratesRes.rows.map((r) => r.unit);
     expect(units).toContain('daily');
+    expect(units).toContain('weekly');
     expect(units).toContain('monthly');
+  });
+
+  it('seeds sensible daily, weekly and monthly rates per equipment model', async () => {
+    const modelsRes = await pool.query<{ id: number; make: string; model: string }>(
+      `SELECT em.id, em.make, em.model 
+       FROM equipment_models em
+       JOIN rates r ON r.model_id = em.id
+       GROUP BY em.id, em.make, em.model`
+    );
+    expect(modelsRes.rows.length).toBeGreaterThanOrEqual(12);
+
+    for (const model of modelsRes.rows) {
+      const ratesRes = await pool.query<{ unit: string; amount: string }>(
+        `SELECT unit, amount FROM rates WHERE model_id = $1`,
+        [model.id]
+      );
+      const unitMap = new Map(ratesRes.rows.map(r => [r.unit, parseFloat(r.amount)]));
+      expect(unitMap.has('daily')).toBe(true);
+      expect(unitMap.has('weekly')).toBe(true);
+      expect(unitMap.has('monthly')).toBe(true);
+
+      const daily = unitMap.get('daily')!;
+      const weekly = unitMap.get('weekly')!;
+      const monthly = unitMap.get('monthly')!;
+
+      // Daily < Weekly < Monthly
+      expect(daily).toBeGreaterThan(0);
+      expect(weekly).toBeGreaterThan(daily);
+      expect(monthly).toBeGreaterThan(weekly);
+      // Sensible discounting: weekly is less than 7 * daily; monthly is less than 5 * weekly
+      expect(weekly).toBeLessThan(7 * daily);
+      expect(monthly).toBeLessThan(5 * weekly);
+    }
+  });
+
+  it('generates demo dates relative to today with exactly two overdue returns', async () => {
+    const overdueRes = await pool.query<{ id: number; status: string; start_date: string; expected_end: string }>(
+      `SELECT id, status, start_date, expected_end
+       FROM rentals
+       WHERE status IN ('confirmed', 'picked_up') AND expected_end < CURRENT_DATE
+       ORDER BY id ASC`
+    );
+    expect(overdueRes.rows.length).toBe(2);
+    for (const row of overdueRes.rows) {
+      expect(row.status).toBe('picked_up');
+      expect(new Date(row.expected_end).getTime()).toBeLessThan(Date.now());
+      expect(new Date(row.start_date).getTime()).toBeLessThan(new Date(row.expected_end).getTime());
+    }
   });
 
   it('seeds received and issued invoices with accurate lines and totals', async () => {

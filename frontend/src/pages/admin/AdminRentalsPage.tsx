@@ -17,8 +17,11 @@ import { useDebounce } from '../../hooks/useDebounce';
 import {
   RentalListItem,
   RentalDetail,
-  RentalStatus,
+  RentalFilterStatus,
   fetchRentals,
+  isRentalOverdue,
+  getDaysOverdue,
+  formatRateUnitLabel,
   fetchRentalById,
   confirmRental,
   pickupRental,
@@ -59,7 +62,7 @@ export default function AdminRentalsPage({
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
 
   // Filters
-  const [statusFilter, setStatusFilter] = useState<RentalStatus | 'all'>('all');
+  const [statusFilter, setStatusFilter] = useState<RentalFilterStatus>('all');
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebounce(search, 300);
 
@@ -81,9 +84,10 @@ export default function AdminRentalsPage({
     setLoading(true);
     setError(null);
 
+    const queryStatus = (statusFilter === 'all' || statusFilter === 'overdue') ? 'all' : statusFilter;
     fetchRentals(
       {
-        status: statusFilter,
+        status: queryStatus,
         limit: 100,
       },
       user?.id
@@ -212,9 +216,13 @@ export default function AdminRentalsPage({
 
   // Filtered by search term
   const filteredRentals = useMemo(() => {
+    let list = rentals;
+    if (statusFilter === 'overdue') {
+      list = list.filter((r) => isRentalOverdue(r.expected_end, r.status));
+    }
     const q = debouncedSearch.trim().toLowerCase();
-    if (!q) return rentals;
-    return rentals.filter((r) => {
+    if (!q) return list;
+    return list.filter((r) => {
       const idMatch = String(r.id).includes(q);
       const custMatch = r.customer_name?.toLowerCase().includes(q);
       const siteMatch = r.site_name?.toLowerCase().includes(q);
@@ -227,6 +235,7 @@ export default function AdminRentalsPage({
   const countConfirmed = useMemo(() => rentals.filter((r) => r.status === 'confirmed').length, [rentals]);
   const countPickedUp = useMemo(() => rentals.filter((r) => r.status === 'picked_up').length, [rentals]);
   const countReturned = useMemo(() => rentals.filter((r) => r.status === 'returned').length, [rentals]);
+  const countOverdue = useMemo(() => rentals.filter((r) => isRentalOverdue(r.expected_end, r.status)).length, [rentals]);
 
   const isOffline = dataSource === 'snapshot';
 
@@ -357,6 +366,15 @@ export default function AdminRentalsPage({
           </div>
         </div>
 
+        <div className="card" style={{ padding: 'var(--space-4)', borderColor: countOverdue > 0 ? 'rgba(220, 38, 38, 0.4)' : undefined }}>
+          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-danger)', fontWeight: 600, textTransform: 'uppercase' }}>
+            Overdue Returns
+          </div>
+          <div style={{ fontSize: 'var(--text-2xl)', fontWeight: 700, fontFamily: 'var(--font-heading)', color: 'var(--color-danger)' }}>
+            {countOverdue}
+          </div>
+        </div>
+
         <div className="card" style={{ padding: 'var(--space-4)' }}>
           <div style={{ fontSize: 'var(--text-xs)', color: 'var(--color-warning)', fontWeight: 600, textTransform: 'uppercase' }}>
             Quotations
@@ -411,6 +429,7 @@ export default function AdminRentalsPage({
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
           {[
             { id: 'all', label: 'All' },
+            { id: 'overdue', label: countOverdue > 0 ? `⚠️ Overdue (${countOverdue})` : 'Overdue' },
             { id: 'quotation', label: 'Quotations' },
             { id: 'confirmed', label: 'Confirmed' },
             { id: 'picked_up', label: 'Picked Up' },
@@ -423,7 +442,7 @@ export default function AdminRentalsPage({
                 key={tab.id}
                 type="button"
                 className="btn btn-ghost"
-                onClick={() => setStatusFilter(tab.id as RentalStatus | 'all')}
+                onClick={() => setStatusFilter(tab.id as RentalFilterStatus)}
                 style={{
                   padding: 'var(--space-1) var(--space-3)',
                   fontSize: 'var(--text-xs)',
@@ -486,17 +505,21 @@ export default function AdminRentalsPage({
                 </tr>
               </thead>
               <tbody>
-                {filteredRentals.map((rental) => (
+                {filteredRentals.map((rental) => {
+                  const isOverdue = isRentalOverdue(rental.expected_end, rental.status);
+                  const days = isOverdue ? getDaysOverdue(rental.expected_end) : 0;
+                  return (
                   <tr
                     key={rental.id}
                     onClick={() => handleOpenDetail(rental.id)}
                     style={{
                       borderBottom: '1px solid var(--color-border-subtle)',
                       cursor: 'pointer',
+                      background: isOverdue ? 'rgba(220, 38, 38, 0.04)' : undefined,
                       transition: 'background var(--transition-fast)',
                     }}
                     onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--color-surface-2)')}
-                    onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = isOverdue ? 'rgba(220, 38, 38, 0.04)' : 'transparent')}
                   >
                     <td style={{ padding: 'var(--space-3) var(--space-4)', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
                       {`#${rental.id}`}
@@ -508,15 +531,21 @@ export default function AdminRentalsPage({
                       {rental.site_name}
                     </td>
                     <td style={{ padding: 'var(--space-3) var(--space-4)' }}>
-                      <span className={`role-tag ${getRentalStatusBadgeClass(rental.status)}`}>
-                        {getRentalStatusLabel(rental.status)}
+                      <span className={`role-tag ${getRentalStatusBadgeClass(rental.status, isOverdue)}`}>
+                        {getRentalStatusLabel(rental.status, isOverdue)}
                       </span>
                     </td>
                     <td style={{ padding: 'var(--space-3) var(--space-4)', color: 'var(--color-text-muted)' }}>
                       {formatDisplayDate(rental.start_date)}
                     </td>
-                    <td style={{ padding: 'var(--space-3) var(--space-4)', color: 'var(--color-text-muted)' }}>
-                      {formatDisplayDate(rental.expected_end)}
+                    <td style={{ padding: 'var(--space-3) var(--space-4)' }}>
+                      {isOverdue ? (
+                        <span style={{ color: 'var(--color-danger)', fontWeight: 600 }}>
+                          ⚠️ {formatDisplayDate(rental.expected_end)} ({days}d overdue)
+                        </span>
+                      ) : (
+                        <span style={{ color: 'var(--color-text-muted)' }}>{formatDisplayDate(rental.expected_end)}</span>
+                      )}
                     </td>
                     <td style={{ padding: 'var(--space-3) var(--space-4)' }}>
                       <span style={{ fontWeight: 600 }}>{rental.active_items}</span> / {rental.total_items}
@@ -559,7 +588,8 @@ export default function AdminRentalsPage({
                       </div>
                     </td>
                   </tr>
-                ))}
+                );
+                })}
               </tbody>
             </table>
           </div>
@@ -679,6 +709,16 @@ export default function AdminRentalsPage({
               </div>
             ) : drawerDetail ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
+                {/* Overdue Alert */}
+                {isRentalOverdue(drawerDetail.expected_end, drawerDetail.status) && (
+                  <div className="alert alert-error">
+                    <span>
+                      ⚠️ <strong>Return Overdue:</strong> This agreement was scheduled to conclude on{' '}
+                      <strong>{formatDisplayDate(drawerDetail.expected_end)}</strong> ({getDaysOverdue(drawerDetail.expected_end)} days overdue).
+                    </span>
+                  </div>
+                )}
+
                 {/* Meta details card */}
                 <div className="card" style={{ padding: 'var(--space-4)', fontSize: 'var(--text-sm)', background: 'var(--color-surface)' }}>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 'var(--space-3)' }}>
@@ -752,7 +792,7 @@ export default function AdminRentalsPage({
                             <td style={{ padding: 'var(--space-2) var(--space-3)', fontWeight: 600 }}>
                               {isAdmin && it.applied_rate !== undefined ? (
                                 <span>
-                                  {formatMoney(it.applied_rate, user?.role)} / {it.rate_unit}
+                                  {formatMoney(it.applied_rate, user?.role)} {formatRateUnitLabel(it.rate_unit)}
                                 </span>
                               ) : (
                                 '—'

@@ -10,6 +10,10 @@ import {
   formatDisplayDate,
   getRentalStatusLabel,
   getRentalStatusBadgeClass,
+  isRentalOverdue,
+  getDaysOverdue,
+  formatRateUnitLabel,
+  getHumanReadableUnit,
   RentalListItem,
   RentalDetail,
   CreateRentalPayload,
@@ -294,6 +298,54 @@ describe('rentalsSource — Data fetching, offline caching & lifecycle actions',
       expect(getRentalStatusBadgeClass('picked_up')).toBe('badge-success');
       expect(getRentalStatusBadgeClass('returned')).toBe('badge-neutral');
       expect(getRentalStatusBadgeClass('cancelled')).toBe('badge-danger');
+      expect(getRentalStatusBadgeClass('picked_up', true)).toBe('badge-danger');
+      expect(getRentalStatusBadgeClass('confirmed', true)).toBe('badge-danger');
+    });
+
+    it('getRentalStatusLabel handles overdue annotation correctly', () => {
+      expect(getRentalStatusLabel('picked_up', true)).toBe('Picked Up (Overdue)');
+      expect(getRentalStatusLabel('confirmed', true)).toBe('Confirmed (Overdue)');
+    });
+
+    it('formatRateUnitLabel formats standard billing frequency units', () => {
+      expect(formatRateUnitLabel('daily')).toBe('/ day');
+      expect(formatRateUnitLabel('weekly')).toBe('/ week');
+      expect(formatRateUnitLabel('monthly')).toBe('/ month');
+      expect(formatRateUnitLabel('hourly')).toBe('/ hour');
+      expect(formatRateUnitLabel('shift')).toBe('/ shift');
+      expect(formatRateUnitLabel(null)).toBe('');
+      expect(formatRateUnitLabel(undefined)).toBe('');
+    });
+
+    it('getHumanReadableUnit returns proper capitalized title for rate units', () => {
+      expect(getHumanReadableUnit('daily')).toBe('Daily');
+      expect(getHumanReadableUnit('weekly')).toBe('Weekly');
+      expect(getHumanReadableUnit('monthly')).toBe('Monthly');
+      expect(getHumanReadableUnit('hourly')).toBe('Hourly');
+      expect(getHumanReadableUnit('project')).toBe('project');
+      expect(getHumanReadableUnit(null)).toBe('—');
+      expect(getHumanReadableUnit(undefined)).toBe('—');
+    });
+
+    it('isRentalOverdue accurately identifies overdue rentals against reference date', () => {
+      const refDate = new Date('2026-11-20T12:00:00Z');
+      expect(isRentalOverdue('2026-11-15', 'picked_up', refDate)).toBe(true);
+      expect(isRentalOverdue('2026-11-19', 'confirmed', refDate)).toBe(true);
+      expect(isRentalOverdue('2026-11-20', 'picked_up', refDate)).toBe(false);
+      expect(isRentalOverdue('2026-11-25', 'picked_up', refDate)).toBe(false);
+      // Non-active rentals are never overdue
+      expect(isRentalOverdue('2026-11-10', 'returned', refDate)).toBe(false);
+      expect(isRentalOverdue('2026-11-10', 'cancelled', refDate)).toBe(false);
+      expect(isRentalOverdue('2026-11-10', 'quotation', refDate)).toBe(false);
+      expect(isRentalOverdue(null, 'picked_up', refDate)).toBe(false);
+    });
+
+    it('getDaysOverdue calculates days elapsed past scheduled return', () => {
+      const refDate = new Date('2026-11-20T12:00:00Z');
+      expect(getDaysOverdue('2026-11-15', refDate)).toBe(5);
+      expect(getDaysOverdue('2026-11-18', refDate)).toBe(2);
+      expect(getDaysOverdue('2026-11-25', refDate)).toBe(0);
+      expect(getDaysOverdue(null, refDate)).toBe(0);
     });
   });
 });

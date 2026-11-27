@@ -18,6 +18,7 @@ import { formatMoney } from './materialsSource';
 
 export type RentalStatus = 'quotation' | 'confirmed' | 'picked_up' | 'returned' | 'cancelled';
 export type RentalRateUnit = 'hourly' | 'daily' | 'weekly' | 'monthly';
+export type RentalFilterStatus = RentalStatus | 'all' | 'overdue';
 
 export interface RentalListItem {
   id: number;
@@ -148,7 +149,35 @@ export function formatDisplayDate(dateStr?: string | null): string {
 /**
  * Human-readable status labels.
  */
-export function getRentalStatusLabel(status: RentalStatus | string): string {
+/**
+ * Checks if an active rental is overdue relative to reference date (or today).
+ */
+export function isRentalOverdue(expectedEnd?: string | null, status?: string, refDate?: Date): boolean {
+  if (!expectedEnd) return false;
+  if (status !== 'picked_up' && status !== 'confirmed') return false;
+  const nowStr = (refDate || new Date()).toISOString().slice(0, 10);
+  const expStr = expectedEnd.slice(0, 10);
+  return expStr < nowStr;
+}
+
+/**
+ * Calculates days overdue past expected end date.
+ */
+export function getDaysOverdue(expectedEnd?: string | null, refDate?: Date): number {
+  if (!expectedEnd) return 0;
+  const expDate = new Date(expectedEnd.slice(0, 10)).getTime();
+  const now = refDate ? refDate.getTime() : new Date().getTime();
+  const diffDays = Math.floor((now - expDate) / (1000 * 60 * 60 * 24));
+  return Math.max(0, diffDays);
+}
+
+/**
+ * Human-readable status labels with optional overdue annotation.
+ */
+export function getRentalStatusLabel(status: RentalStatus | string, isOverdue?: boolean): string {
+  if (isOverdue) {
+    return status === 'picked_up' ? 'Picked Up (Overdue)' : 'Confirmed (Overdue)';
+  }
   switch (status) {
     case 'quotation':
       return 'Quotation';
@@ -166,9 +195,48 @@ export function getRentalStatusLabel(status: RentalStatus | string): string {
 }
 
 /**
+ * Human-readable rate unit suffix (e.g. '/ day', '/ month').
+ */
+export function formatRateUnitLabel(unit?: string | null): string {
+  switch (unit) {
+    case 'daily':
+      return '/ day';
+    case 'weekly':
+      return '/ week';
+    case 'monthly':
+      return '/ month';
+    case 'hourly':
+      return '/ hour';
+    default:
+      return unit ? `/ ${unit}` : '';
+  }
+}
+
+/**
+ * Human-readable rate unit title (e.g. 'Daily', 'Weekly', 'Monthly').
+ */
+export function getHumanReadableUnit(unit?: string | null): string {
+  switch (unit) {
+    case 'daily':
+      return 'Daily';
+    case 'weekly':
+      return 'Weekly';
+    case 'monthly':
+      return 'Monthly';
+    case 'hourly':
+      return 'Hourly';
+    default:
+      return unit || '—';
+  }
+}
+
+/**
  * Status badge CSS class mapping.
  */
-export function getRentalStatusBadgeClass(status: RentalStatus | string): string {
+export function getRentalStatusBadgeClass(status: RentalStatus | string, isOverdue?: boolean): string {
+  if (isOverdue) {
+    return 'badge-danger';
+  }
   switch (status) {
     case 'quotation':
       return 'badge-warning';

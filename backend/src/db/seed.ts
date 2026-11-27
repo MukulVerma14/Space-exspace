@@ -129,36 +129,57 @@ export async function seedDatabase() {
     // 4. STANDARD RATE CARDS (SAR, vertical 1NF structure)
     // =========================================================================
     const rateCards = [
-      // Tadano 50T
+      // 1. Tadano 50T Mobile Crane
       { modelKey: 'Tadano-GR-500EX', unit: 'hourly', amount: 350.00 },
       { modelKey: 'Tadano-GR-500EX', unit: 'daily', amount: 2200.00 },
       { modelKey: 'Tadano-GR-500EX', unit: 'weekly', amount: 11000.00 },
       { modelKey: 'Tadano-GR-500EX', unit: 'monthly', amount: 38000.00 },
-      // Kato 35T
+      // 2. Kato 35T Mobile Crane
+      { modelKey: 'Kato-CR-350Ri', unit: 'hourly', amount: 250.00 },
       { modelKey: 'Kato-CR-350Ri', unit: 'daily', amount: 1600.00 },
-      { modelKey: 'Kato-CR-350Ri', unit: 'monthly', amount: 29000.00 },
-      // Grove 70T
+      { modelKey: 'Kato-CR-350Ri', unit: 'weekly', amount: 8000.00 },
+      { modelKey: 'Kato-CR-350Ri', unit: 'monthly', amount: 28000.00 },
+      // 3. Grove 70T Rough Terrain Crane
+      { modelKey: 'Grove-RT770E', unit: 'hourly', amount: 450.00 },
       { modelKey: 'Grove-RT770E', unit: 'daily', amount: 3000.00 },
+      { modelKey: 'Grove-RT770E', unit: 'weekly', amount: 15000.00 },
       { modelKey: 'Grove-RT770E', unit: 'monthly', amount: 52000.00 },
-      // Liebherr 100T
+      // 4. Liebherr 100T Rough Terrain Crane
+      { modelKey: 'Liebherr-LTM 1100', unit: 'hourly', amount: 800.00 },
       { modelKey: 'Liebherr-LTM 1100', unit: 'daily', amount: 5500.00 },
+      { modelKey: 'Liebherr-LTM 1100', unit: 'weekly', amount: 27500.00 },
       { modelKey: 'Liebherr-LTM 1100', unit: 'monthly', amount: 95000.00 },
-      // Cummins 250 kVA
+      // 5. Cummins 250 kVA Diesel Generator
       { modelKey: 'Cummins-C250 D5', unit: 'daily', amount: 450.00 },
+      { modelKey: 'Cummins-C250 D5', unit: 'weekly', amount: 2250.00 },
       { modelKey: 'Cummins-C250 D5', unit: 'monthly', amount: 7800.00 },
-      // CAT 500 kVA
+      // 6. CAT 500 kVA Diesel Generator
       { modelKey: 'Caterpillar-DE500 GC', unit: 'daily', amount: 850.00 },
+      { modelKey: 'Caterpillar-DE500 GC', unit: 'weekly', amount: 4250.00 },
       { modelKey: 'Caterpillar-DE500 GC', unit: 'monthly', amount: 14500.00 },
-      // 20ft Container
+      // 7. 20ft Storage Container
+      { modelKey: 'CIMC-Dry Van 20ft', unit: 'daily', amount: 70.00 },
+      { modelKey: 'CIMC-Dry Van 20ft', unit: 'weekly', amount: 350.00 },
       { modelKey: 'CIMC-Dry Van 20ft', unit: 'monthly', amount: 1200.00 },
-      // 40ft Container
+      // 8. 40ft High Cube Container
+      { modelKey: 'CIMC-High Cube 40ft', unit: 'daily', amount: 120.00 },
+      { modelKey: 'CIMC-High Cube 40ft', unit: 'weekly', amount: 600.00 },
       { modelKey: 'CIMC-High Cube 40ft', unit: 'monthly', amount: 2200.00 },
-      // Site Office 40x10
+      // 9. Portable Executive Site Office 40x10
+      { modelKey: 'Space Modular-Executive Office 40x10', unit: 'daily', amount: 250.00 },
+      { modelKey: 'Space Modular-Executive Office 40x10', unit: 'weekly', amount: 1250.00 },
       { modelKey: 'Space Modular-Executive Office 40x10', unit: 'monthly', amount: 4500.00 },
-      // Ablution 4-Bay
+      // 10. Portable Meeting Unit 20x10
+      { modelKey: 'Space Modular-Meeting Unit 20x10', unit: 'daily', amount: 200.00 },
+      { modelKey: 'Space Modular-Meeting Unit 20x10', unit: 'weekly', amount: 1000.00 },
+      { modelKey: 'Space Modular-Meeting Unit 20x10', unit: 'monthly', amount: 3600.00 },
+      // 11. Portable Ablution 4-Bay Unit
+      { modelKey: 'Sanitech-Ablution 4-Bay', unit: 'daily', amount: 160.00 },
+      { modelKey: 'Sanitech-Ablution 4-Bay', unit: 'weekly', amount: 800.00 },
       { modelKey: 'Sanitech-Ablution 4-Bay', unit: 'monthly', amount: 2800.00 },
-      // Industrial Washer
+      // 12. Industrial High-Pressure Cleaner
       { modelKey: 'Kärcher-HDS 13/20-4 S', unit: 'daily', amount: 400.00 },
+      { modelKey: 'Kärcher-HDS 13/20-4 S', unit: 'weekly', amount: 1900.00 },
       { modelKey: 'Kärcher-HDS 13/20-4 S', unit: 'monthly', amount: 6500.00 },
     ];
 
@@ -397,30 +418,46 @@ export async function seedDatabase() {
     }
 
     // =========================================================================
-    // 8. RENTALS & RENTAL ITEMS
+    // 8. RENTALS & RENTAL ITEMS (RELATIVE DATES WITH 2 OVERDUE RETURNS)
     // Total 3 rentals:
     // - Rental 1 (picked_up): 5 items (CRN-50-001, CRN-50-002, GEN-250-001, OFF-40-001, WSH-04-001)
-    // - Rental 2 (returned): 1 item (CRN-35-001, returned)
+    //   Dates relative to today: started 25 days ago, expected return 5 days ago (OVERDUE RETURN #1)
+    // - Rental 2 (returned): 1 item (CRN-35-001, returned 15 days ago)
     // - Rental 3 (picked_up): 2 items (CRN-35-002, CNT-40-003)
-    // Result: exactly 2 active rentals containing 5 and 2 items respectively (total 7 items currently rented)
+    //   Dates relative to today: started 12 days ago, expected return 2 days ago (OVERDUE RETURN #2)
+    // Result: exactly 2 active rentals containing 5 and 2 items respectively (total 7 items currently rented, both overdue)
     // =========================================================================
-    // Rental 1: Active rental with Apex Infrastructure Partners at King Salman Port Terminal
+    const today = new Date();
+    const relativeDate = (offsetDays: number): string => {
+      const d = new Date(today);
+      d.setDate(d.getDate() + offsetDays);
+      return d.toISOString().split('T')[0];
+    };
+
+    // Rental 1: Active rental with Apex Infrastructure Partners at King Salman Port Terminal (OVERDUE RETURN #1)
     const apexId = partyIdMap.get('Apex Infrastructure Partners')!;
     const portSiteId = locationIdMap.get('King Salman Port Terminal Site')!;
 
+    const r1Start = relativeDate(-25);
+    const r1ExpectedEnd = relativeDate(-5); // Overdue by 5 days
+
     let rental1Id: number;
     const r1Check = await client.query(
-      `SELECT id FROM rentals WHERE customer_id = $1 AND site_id = $2 AND start_date = '2026-09-01'`,
+      `SELECT id FROM rentals WHERE customer_id = $1 AND site_id = $2`,
       [apexId, portSiteId]
     );
     if (r1Check.rows.length > 0) {
       rental1Id = r1Check.rows[0].id;
+      await client.query(
+        `UPDATE rentals SET status = 'picked_up', start_date = $2, expected_end = $3 WHERE id = $1`,
+        [rental1Id, r1Start, r1ExpectedEnd]
+      );
     } else {
       const r1Res = await client.query(
         `INSERT INTO rentals (customer_id, site_id, status, start_date, expected_end)
-         VALUES ($1, $2, 'picked_up', '2026-09-01', '2026-12-31')
+         VALUES ($1, $2, 'picked_up', $3, $4)
          RETURNING id`,
-        [apexId, portSiteId]
+        [apexId, portSiteId, r1Start, r1ExpectedEnd]
       );
       rental1Id = r1Res.rows[0].id;
     }
@@ -455,23 +492,30 @@ export async function seedDatabase() {
     }
 
     // Rental 2: Historical / Returned rental with Gulf Petrochemical Services at Ras Tanura Site
-    // Equipment: CRN-35-001 (was rented for 1 month, now returned)
     const gulfPetroId = partyIdMap.get('Gulf Petrochemical Services Ltd')!;
     const rasTanuraSiteId = locationIdMap.get('Ras Tanura Project Site')!;
 
+    const r2Start = relativeDate(-45);
+    const r2ExpectedEnd = relativeDate(-15);
+    const r2ReturnedAt = `${r2ExpectedEnd} 16:00:00+03`;
+
     let rental2Id: number;
     const r2Check = await client.query(
-      `SELECT id FROM rentals WHERE customer_id = $1 AND site_id = $2 AND start_date = '2026-08-01'`,
+      `SELECT id FROM rentals WHERE customer_id = $1 AND site_id = $2`,
       [gulfPetroId, rasTanuraSiteId]
     );
     if (r2Check.rows.length > 0) {
       rental2Id = r2Check.rows[0].id;
+      await client.query(
+        `UPDATE rentals SET status = 'returned', start_date = $2, expected_end = $3 WHERE id = $1`,
+        [rental2Id, r2Start, r2ExpectedEnd]
+      );
     } else {
       const r2Res = await client.query(
         `INSERT INTO rentals (customer_id, site_id, status, start_date, expected_end)
-         VALUES ($1, $2, 'returned', '2026-08-01', '2026-08-31')
+         VALUES ($1, $2, 'returned', $3, $4)
          RETURNING id`,
-        [gulfPetroId, rasTanuraSiteId]
+        [gulfPetroId, rasTanuraSiteId, r2Start, r2ExpectedEnd]
       );
       rental2Id = r2Res.rows[0].id;
     }
@@ -483,36 +527,42 @@ export async function seedDatabase() {
     );
     if (r2ItemCheck.rows.length > 0) {
       await client.query(
-        `UPDATE rental_items SET returned_at = '2026-08-31 16:00:00+03'
+        `UPDATE rental_items SET applied_rate = 28000.00, rate_unit = 'monthly', returned_at = $3
          WHERE rental_id = $1 AND equipment_id = $2`,
-        [rental2Id, returnedEqId]
+        [rental2Id, returnedEqId, r2ReturnedAt]
       );
     } else {
       await client.query(
         `INSERT INTO rental_items (rental_id, equipment_id, applied_rate, rate_unit, returned_at)
-         VALUES ($1, $2, 28000.00, 'monthly', '2026-08-31 16:00:00+03')`,
-        [rental2Id, returnedEqId]
+         VALUES ($1, $2, 28000.00, 'monthly', $3)`,
+        [rental2Id, returnedEqId, r2ReturnedAt]
       );
     }
 
-    // Rental 3: Active rental with Al-Noor Commercial Contracting at Al-Khobar Commercial Tower
-    // Equipment: CRN-35-002, CNT-40-003
+    // Rental 3: Active rental with Al-Noor Commercial Contracting at Al-Khobar Commercial Tower (OVERDUE RETURN #2)
     const alnoorId = partyIdMap.get('Al-Noor Commercial Contracting')!;
     const khobarSiteId = locationIdMap.get('Al-Khobar Commercial Tower Site')!;
 
+    const r3Start = relativeDate(-12);
+    const r3ExpectedEnd = relativeDate(-2); // Overdue by 2 days
+
     let rental3Id: number;
     const r3Check = await client.query(
-      `SELECT id FROM rentals WHERE customer_id = $1 AND site_id = $2 AND start_date = '2026-10-01'`,
+      `SELECT id FROM rentals WHERE customer_id = $1 AND site_id = $2`,
       [alnoorId, khobarSiteId]
     );
     if (r3Check.rows.length > 0) {
       rental3Id = r3Check.rows[0].id;
+      await client.query(
+        `UPDATE rentals SET status = 'picked_up', start_date = $2, expected_end = $3 WHERE id = $1`,
+        [rental3Id, r3Start, r3ExpectedEnd]
+      );
     } else {
       const r3Res = await client.query(
         `INSERT INTO rentals (customer_id, site_id, status, start_date, expected_end)
-         VALUES ($1, $2, 'picked_up', '2026-10-01', '2026-11-30')
+         VALUES ($1, $2, 'picked_up', $3, $4)
          RETURNING id`,
-        [alnoorId, khobarSiteId]
+        [alnoorId, khobarSiteId, r3Start, r3ExpectedEnd]
       );
       rental3Id = r3Res.rows[0].id;
     }

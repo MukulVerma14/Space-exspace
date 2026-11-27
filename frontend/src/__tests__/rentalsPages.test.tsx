@@ -111,6 +111,8 @@ describe('Rentals Pages — Admin & Staff UI, Offline & Privacy Policy', () => {
       expect(html).toContain('Confirmed (Awaiting Dispatch)');
       expect(html).toContain('Picked Up / On Site');
       expect(html).toContain('Returned / Completed');
+      expect(html).toContain('Overdue Returns');
+      expect(html).toContain('Overdue');
 
       // Verify status filter tabs
       expect(html).toContain('All');
@@ -233,6 +235,8 @@ describe('Rentals Pages — Admin & Staff UI, Offline & Privacy Policy', () => {
       expect(html).toContain('Active Rentals');
       expect(html).toContain('Awaiting Yard Dispatch');
       expect(html).toContain('Active on Client Sites');
+      expect(html).toContain('Overdue Returns');
+      expect(html).toContain('Overdue');
       expect(html).toContain('All Active');
       expect(html).toContain('Destination Site');
 

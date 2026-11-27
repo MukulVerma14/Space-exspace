@@ -29,6 +29,7 @@ import {
 import NewSupplierInvoiceModal from '../../components/NewSupplierInvoiceModal';
 import NewCustomerInvoiceModal from '../../components/NewCustomerInvoiceModal';
 import { ApiRequestError } from '../../api/client';
+import { formatDisplayDate } from '../../data/rentalsSource';
 
 function getTodayString(): string {
   return new Date().toISOString().split('T')[0];
@@ -699,11 +700,11 @@ export default function InvoicesPage() {
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 'var(--space-3)' }}>
                     <div>
                       <span style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-xs)' }}>Invoice Date: </span>
-                      <strong>{drawerDetail.invoice_date}</strong>
+                      <strong>{formatDisplayDate(drawerDetail.invoice_date)}</strong>
                     </div>
                     <div>
                       <span style={{ color: 'var(--color-text-muted)', fontSize: 'var(--text-xs)' }}>Due Date: </span>
-                      <strong>{drawerDetail.due_date}</strong>
+                      <strong>{formatDisplayDate(drawerDetail.due_date)}</strong>
                     </div>
 
                     {drawerDetail.rental_id && (
@@ -724,7 +725,7 @@ export default function InvoicesPage() {
                     {drawerDetail.voided_at && (
                       <div style={{ gridColumn: '1 / -1' }}>
                         <span style={{ color: 'var(--color-danger)', fontSize: 'var(--text-xs)' }}>Voided: </span>
-                        <strong>{new Date(drawerDetail.voided_at).toLocaleDateString()}</strong>
+                        <strong>{formatDisplayDate(drawerDetail.voided_at)}</strong>
                         {drawerDetail.voided_by_name && ` by ${drawerDetail.voided_by_name}`}
                         {drawerDetail.void_reason && (
                           <div style={{ color: 'var(--color-danger)', fontStyle: 'italic', marginTop: 'var(--space-1)' }}>
