@@ -1,13 +1,14 @@
 import { UserRole } from '../types/auth.js';
 
 /**
- * List of sensitive monetary and rate fields that must NEVER be visible to staff.
+ * List of sensitive monetary, rate, and customer contact fields that must NEVER be visible to staff.
  * WHY SERVER-SIDE SERIALIZATION: Relying on the UI (React `if role === 'admin'`)
- * to hide sensitive prices is a classic security anti-pattern. Anyone can inspect
+ * to hide sensitive prices or customer contact details is a classic security anti-pattern. Anyone can inspect
  * HTTP responses in browser DevTools or curl the API directly. True defense in depth
  * requires that the server physically omits these fields before sending the JSON response.
  */
-const RESTRICTED_RATE_KEYS = new Set([
+const RESTRICTED_KEYS = new Set([
+  // Monetary & pricing fields
   'applied_rate',
   'rates',
   'rate_card',
@@ -20,14 +21,23 @@ const RESTRICTED_RATE_KEYS = new Set([
   'total',
   'discount_note',
   'cost', // maintenance repair costs
+
+  // Customer contact details (Staff responses must contain no customer contact details)
+  'customer_contact',
+  'customer_phone',
+  'contact_person',
+  'phone',
+  'email',
 ]);
 
+export const RESTRICTED_RATE_KEYS = RESTRICTED_KEYS;
+
 /**
- * Recursively strips rate and financial fields from any object or array
+ * Recursively strips rate, financial, and customer contact fields from any object or array
  * when the requesting user role is NOT 'admin'.
  */
 export function sanitizeFinancials<T>(data: T, userRole: UserRole): T {
-  // Administrators have full visibility into rate cards, costs, and contract prices
+  // Administrators have full visibility into rate cards, costs, contract prices, and customer contact details
   if (userRole === 'admin') {
     return data;
   }
@@ -50,8 +60,8 @@ export function sanitizeFinancials<T>(data: T, userRole: UserRole): T {
   // Handle plain objects
   const sanitized: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
-    if (RESTRICTED_RATE_KEYS.has(key)) {
-      // Omit the restricted financial key entirely from staff responses
+    if (RESTRICTED_KEYS.has(key)) {
+      // Omit the restricted key entirely from staff responses
       continue;
     }
 

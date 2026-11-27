@@ -1,7 +1,24 @@
 import { Request, Response } from 'express';
 import { z } from 'zod';
+import { Decimal } from 'decimal.js';
 import { pool } from '../db/pool.js';
 import { sanitizeFinancials } from '../serializers/rateSerializer.js';
+
+// Configure Decimal for financial precision: 28 digits, standard commercial half-up rounding
+Decimal.set({ precision: 28, rounding: Decimal.ROUND_HALF_UP });
+
+/**
+ * Validates that a numeric or string rate is a valid non-negative decimal with at most 2 decimal places.
+ */
+function isValidDecimalRate(val: unknown): boolean {
+  if (typeof val !== 'number' && typeof val !== 'string') return false;
+  try {
+    const d = new Decimal(val);
+    return d.isFinite() && d.gte(0) && d.decimalPlaces() <= 2;
+  } catch {
+    return false;
+  }
+}
 
 // Validation schemas for rental lifecycle
 const createRentalSchema = z.object({
@@ -12,7 +29,9 @@ const createRentalSchema = z.object({
   status: z.enum(['quotation', 'confirmed', 'picked_up']).default('confirmed'),
   items: z.array(z.object({
     equipment_id: z.number().int().positive('Equipment ID must be a positive integer'),
-    applied_rate: z.number().nonnegative('Applied rate must be non-negative'),
+    applied_rate: z.union([z.number(), z.string()]).refine(isValidDecimalRate, {
+      message: 'Applied rate must be a non-negative decimal with at most 2 decimal places'
+    }),
     rate_unit: z.enum(['hourly', 'daily', 'weekly', 'monthly']),
     discount_note: z.string().optional()
   })).min(1, 'Rental must include at least one equipment item')
@@ -33,7 +52,7 @@ const returnRentalSchema = z.object({
 /**
  * List rentals with filtering and pagination.
  * Accessible to both Admin and Staff.
- * Staff responses are sanitized to remove agreed rates.
+ * Staff responses are sanitized to remove agreed rates and customer contact details.
  */
 export async function listRentals(req: Request, res: Response): Promise<void> {
   const page = Math.max(1, parseInt(req.query.page as string || '1', 10));
@@ -104,6 +123,8 @@ export async function listRentals(req: Request, res: Response): Promise<void> {
 
 /**
  * Get detailed rental agreement by ID, including its line items.
+ * Accessible to both Admin and Staff.
+ * Staff responses are sanitized to remove agreed rates and customer contact details.
  */
 export async function getRentalById(req: Request, res: Response): Promise<void> {
   const rentalId = parseInt(req.params.id, 10);
@@ -243,12 +264,13 @@ export async function createRental(req: Request, res: Response): Promise<void> {
     );
     const rentalId = rentalInsert.rows[0].id;
 
-    // 5. Insert line items
+    // 5. Insert line items storing exact applied_rate via decimal.js
     for (const item of items) {
+      const normalizedRate = new Decimal(item.applied_rate).toFixed(2);
       await client.query(
         `INSERT INTO rental_items (rental_id, equipment_id, applied_rate, rate_unit, discount_note)
          VALUES ($1, $2, $3, $4, $5)`,
-        [rentalId, item.equipment_id, item.applied_rate, item.rate_unit, item.discount_note || null]
+        [rentalId, item.equipment_id, normalizedRate, item.rate_unit, item.discount_note || null]
       );
 
       // If status is immediately 'picked_up', log movement to client site
@@ -279,6 +301,186 @@ export async function createRental(req: Request, res: Response): Promise<void> {
       return;
     }
     res.status(500).json({ error: 'Failed to create rental agreement', details: errorMsg });
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Confirm a rental agreement quotation.
+ * Restricted to Admin role.
+ * Verifies all items are currently available before moving status from 'quotation' to 'confirmed'.
+ */
+export async function confirmRental(req: Request, res: Response): Promise<void> {
+  const rentalId = parseInt(req.params.id, 10);
+  if (isNaN(rentalId)) {
+    res.status(400).json({ error: 'Invalid rental ID' });
+    return;
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Fetch and lock rental header
+    const rentalRes = await client.query<{ id: string; status: string }>(
+      `SELECT id, status FROM rentals WHERE id = $1 FOR UPDATE`,
+      [rentalId]
+    );
+
+    if (rentalRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ error: 'Rental agreement not found' });
+      return;
+    }
+
+    const rental = rentalRes.rows[0];
+
+    if (rental.status === 'confirmed' || rental.status === 'picked_up') {
+      await client.query('ROLLBACK');
+      res.status(400).json({ error: 'Rental agreement is already confirmed or picked up' });
+      return;
+    }
+
+    if (rental.status === 'cancelled' || rental.status === 'returned') {
+      await client.query('ROLLBACK');
+      res.status(400).json({ error: `Cannot confirm a rental that is already ${rental.status}` });
+      return;
+    }
+
+    if (rental.status !== 'quotation') {
+      await client.query('ROLLBACK');
+      res.status(400).json({ error: 'Only quotations can be confirmed' });
+      return;
+    }
+
+    // 2. Fetch all equipment items associated with this rental
+    const itemsRes = await client.query<{ equipment_id: number; applied_rate: string }>(
+      `SELECT equipment_id, applied_rate FROM rental_items WHERE rental_id = $1`,
+      [rentalId]
+    );
+
+    if (itemsRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      res.status(400).json({ error: 'Rental agreement has no equipment items' });
+      return;
+    }
+
+    const equipmentIds = itemsRes.rows.map(r => r.equipment_id);
+
+    // 3. Verify availability of every requested equipment item
+    // Equipment must not be rented, under repair, or inactive
+    const conflictCheck = await client.query<{ equipment_id: number; asset_code: string; current_status: string }>(
+      `SELECT e.id AS equipment_id, e.asset_code, v.status AS current_status
+       FROM equipment e
+       JOIN v_equipment_current v ON v.id = e.id
+       WHERE e.id = ANY($1::int[]) AND (
+         v.status = 'rented' OR v.status = 'under_repair' OR e.active = false
+       )`,
+      [equipmentIds]
+    );
+
+    if (conflictCheck.rows.length > 0) {
+      await client.query('ROLLBACK');
+      const conflict = conflictCheck.rows[0];
+      res.status(409).json({
+        error: `Equipment '${conflict.asset_code}' is currently unavailable (Status: ${conflict.current_status})`,
+        conflict_asset_code: conflict.asset_code,
+        conflict_status: conflict.current_status
+      });
+      return;
+    }
+
+    // 4. Update status to 'confirmed'
+    await client.query(
+      `UPDATE rentals SET status = 'confirmed' WHERE id = $1`,
+      [rentalId]
+    );
+
+    await client.query('COMMIT');
+
+    res.json({
+      message: 'Rental agreement confirmed successfully',
+      rental_id: rentalId,
+      status: 'confirmed'
+    });
+  } catch (err: unknown) {
+    await client.query('ROLLBACK');
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    if (errorMsg.includes('uq_active_rental_item')) {
+      res.status(409).json({
+        error: 'One or more equipment items are already assigned to an active rental contract'
+      });
+      return;
+    }
+    res.status(500).json({ error: 'Failed to confirm rental agreement', details: errorMsg });
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Cancel a rental agreement.
+ * Restricted to Admin role.
+ * Automatically frees all items attached to this rental via DB trigger `trg_rental_status_change`.
+ */
+export async function cancelRental(req: Request, res: Response): Promise<void> {
+  const rentalId = parseInt(req.params.id, 10);
+  if (isNaN(rentalId)) {
+    res.status(400).json({ error: 'Invalid rental ID' });
+    return;
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const rentalRes = await client.query<{ id: string; status: string }>(
+      `SELECT id, status FROM rentals WHERE id = $1 FOR UPDATE`,
+      [rentalId]
+    );
+
+    if (rentalRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ error: 'Rental agreement not found' });
+      return;
+    }
+
+    const rental = rentalRes.rows[0];
+
+    if (rental.status === 'cancelled') {
+      await client.query('ROLLBACK');
+      res.status(400).json({ error: 'Rental agreement is already cancelled' });
+      return;
+    }
+
+    if (rental.status === 'returned') {
+      await client.query('ROLLBACK');
+      res.status(400).json({ error: 'Cannot cancel a rental agreement that has already been returned' });
+      return;
+    }
+
+    // Update rental status to 'cancelled'.
+    // The DB trigger `trg_rental_status_change` automatically sets `returned_at = CURRENT_TIMESTAMP`
+    // for all unreturned items on this rental, freeing them at the DB level and in `v_equipment_current`.
+    await client.query(
+      `UPDATE rentals SET status = 'cancelled' WHERE id = $1`,
+      [rentalId]
+    );
+
+    await client.query('COMMIT');
+
+    res.json({
+      message: 'Rental agreement cancelled successfully. All items freed.',
+      rental_id: rentalId,
+      status: 'cancelled'
+    });
+  } catch (err: unknown) {
+    await client.query('ROLLBACK');
+    res.status(500).json({
+      error: 'Failed to cancel rental agreement',
+      details: err instanceof Error ? err.message : String(err)
+    });
   } finally {
     client.release();
   }
@@ -325,6 +527,12 @@ export async function pickupRental(req: Request, res: Response): Promise<void> {
     if (rental.status === 'returned' || rental.status === 'cancelled') {
       await client.query('ROLLBACK');
       res.status(400).json({ error: `Cannot pick up a rental that is already ${rental.status}` });
+      return;
+    }
+
+    if (rental.status === 'quotation') {
+      await client.query('ROLLBACK');
+      res.status(400).json({ error: 'Cannot pick up a quotation. The rental agreement must be confirmed first.' });
       return;
     }
 

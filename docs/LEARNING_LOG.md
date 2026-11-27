@@ -1909,3 +1909,58 @@ This document records every step of building the SPACE EXSPACE equipment and mat
 - The overlay and label stamp on a real phone and in print preview.
 - The reset script against a throwaway database, and the cron entry on the demo server.
 
+
+---
+
+## Step R1: Rental Backend Lifecycle Endpoints, Financial Validation, and Data Sanitization
+
+### What we built:
+- **Quotation Confirmation Endpoint (`POST /api/rentals/:id/confirm`)**:
+  - Restricted to Admin role.
+  - Verifies the rental is in status `quotation` and acquires a row-level lock (`FOR UPDATE`).
+  - Queries `v_equipment_current` to verify every assigned machine is currently available (not rented, not in repair, and active). Returns HTTP 409 Conflict if any item is unavailable.
+  - Updates rental status to `confirmed`, causing `v_equipment_current` to dynamically derive the equipment status as `rented`.
+- **Rental Cancellation Endpoint (`POST /api/rentals/:id/cancel`)**:
+  - Restricted to Admin role.
+  - Prevents cancelling already cancelled or returned agreements.
+  - Updates status to `cancelled`. The database trigger `trg_rental_status_change` automatically fires on `rentals`, setting `returned_at = CURRENT_TIMESTAMP` on all unreturned items. This immediately frees `uq_active_rental_item` and causes `v_equipment_current` to return `available`.
+- **Decimal.js Applied Rate Validation & Normalization**:
+  - Uses `Decimal` from `decimal.js` with 28 digits of precision and half-up rounding.
+  - Validates that `applied_rate` is a valid, non-negative decimal with at most 2 decimal places. Rejects float drift and excessive decimal places with HTTP 400.
+  - Normalizes rates to exact 2-decimal strings (`new Decimal(item.applied_rate).toFixed(2)`) for database insertion.
+- **Enhanced Role-Based Data Sanitization (`rateSerializer.ts`)**:
+  - Added customer contact details (`customer_contact`, `customer_phone`, `contact_person`, `phone`, `email`) to the recursive sanitizer set in addition to financial keys (`applied_rate`, `discount_note`, `amount`, `subtotal`, `total`, `cost`).
+  - Staff responses from `GET /api/rentals` and `GET /api/rentals/:id` physically omit all money figures and customer contact info, while preserving operational data (`asset_code`, `customer_name`, `site_name`, `status`, dates).
+- **Comprehensive Integration Test Suite (`backend/src/__tests__/rentals_lifecycle.test.ts`)**:
+  - Added 8 dedicated integration tests asserting all required rules:
+    1. Items must be available (conflict 409 when attempting to rent already rented or maintenance equipment).
+    2. No active rental per item (prevents duplicate active rentals for the same asset).
+    3. Applied rate stored per item (rates are preserved independently of standard rate card changes).
+    4. Quotation or cancelled rental never makes an item rented (view status remains `available`).
+    5. Cancelling frees items (trigger populates `returned_at` and allows immediate re-rental).
+    6. Exact decimal.js rate validation and precision checks.
+    7. Staff responses contain zero money and zero customer contact details.
+    8. Admin-only guards on create/confirm/cancel, and quotation pickup rejection.
+
+### Why it exists:
+- **Commercial Contract Integrity**: Rental agreements establish agreed daily or monthly tariffs that must be locked in at signing. Changing standard catalog rates later must not alter existing signed contracts.
+- **Field & Yard Reality**: Technicians checking equipment into or out of the yard need to see equipment model and customer site destinations, but should never be privy to customer billing rates or customer executive phone numbers.
+- **Quotation Workflow**: Sales teams generate quotes for potential projects without taking physical cranes or generators out of available inventory until the client confirms the contract.
+
+### Why this way:
+- **PostgreSQL Trigger (`trg_rental_status_change`) over Application Cleanup**:
+  - Trigger ensures that if a rental is cancelled, line item timestamps are updated atomically in the same database transaction. No network interruption or partial server crash can leave orphan locked equipment.
+- **Server-Side Data Stripping over Client-Side Role Checks**:
+  - Client-side `if (role === 'admin')` checks do not prevent network inspection or curl inspection. Scrubbing keys recursively on the server guarantees true defense in depth.
+
+### How to verify:
+1. Run backend tests:
+   ```bash
+   npm --workspace=backend test
+   ```
+   *Result*: 12 test files passed (**171 / 171 tests passed**).
+2. Run frontend tests:
+   ```bash
+   npm --workspace=frontend test
+   ```
+   *Result*: 9 test files passed (**101 / 101 tests passed**).

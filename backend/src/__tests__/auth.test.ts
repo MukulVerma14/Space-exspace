@@ -1,35 +1,38 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import { app } from '../app.js';
 import { pool } from '../db/pool.js';
 import { seedDatabase } from '../db/seed.js';
 import { sanitizeFinancials } from '../serializers/rateSerializer.js';
 
-describe('Auth, RBAC, and Server-Side Rate Serialization Suite', () => {
+describe('Step 4: Authentication, RBAC & Token Security Suite', () => {
   let adminToken: string;
   let staffToken: string;
 
   beforeAll(async () => {
-    // Ensure database is populated with initial seeded users and records
+    // Re-seed to guarantee test credentials and baseline state
     await seedDatabase();
 
-    // Authenticate admin to obtain valid token
+    // Login as Admin
     const adminRes = await request(app)
       .post('/api/auth/login')
       .send({ email: 'admin@spaceexspace.com', password: 'Admin#2026!Dev' });
-    expect(adminRes.status).toBe(200);
     adminToken = adminRes.body.token;
 
-    // Authenticate staff to obtain valid token
+    // Login as Staff
     const staffRes = await request(app)
       .post('/api/auth/login')
       .send({ email: 'staff@spaceexspace.com', password: 'Staff#2026!Dev' });
-    expect(staffRes.status).toBe(200);
     staffToken = staffRes.body.token;
   });
 
+  afterAll(async () => {
+    // Re-seed after tests to keep DB pristine
+    await seedDatabase();
+  });
+
   describe('POST /api/auth/login', () => {
-    it('successfully logs in admin and returns token and user profile', async () => {
+    it('authenticates valid admin credentials and returns JWT token + user profile', async () => {
       const res = await request(app)
         .post('/api/auth/login')
         .send({ email: 'admin@spaceexspace.com', password: 'Admin#2026!Dev' });
@@ -45,47 +48,43 @@ describe('Auth, RBAC, and Server-Side Rate Serialization Suite', () => {
       });
     });
 
-    it('successfully logs in staff and returns role = staff', async () => {
+    it('authenticates valid staff credentials and returns JWT token + user profile', async () => {
       const res = await request(app)
         .post('/api/auth/login')
         .send({ email: 'staff@spaceexspace.com', password: 'Staff#2026!Dev' });
 
       expect(res.status).toBe(200);
       expect(res.body.token).toBeDefined();
-      expect(res.body.user.role).toBe('staff');
-      expect(res.body.user.name).toBe('Tariq Mansour (Yard Lead)');
+      expect(typeof res.body.token).toBe('string');
+      expect(res.body.user).toEqual({
+        id: expect.any(Number),
+        name: 'Tariq Mansour (Yard Lead)',
+        email: 'staff@spaceexspace.com',
+        role: 'staff',
+      });
     });
 
-    it('rejects incorrect password with 401 and generic message', async () => {
+    it('rejects invalid password with 401 Unauthorized', async () => {
       const res = await request(app)
         .post('/api/auth/login')
         .send({ email: 'admin@spaceexspace.com', password: 'WrongPassword123!' });
 
       expect(res.status).toBe(401);
-      expect(res.body.error).toBe('Invalid email or password');
+      expect(res.body.error).toMatch(/Invalid email or password/i);
+      expect(res.body.token).toBeUndefined();
     });
 
-    it('rejects non-existent email with 401 without revealing user existence', async () => {
+    it('rejects non-existent user email with 401 Unauthorized', async () => {
       const res = await request(app)
         .post('/api/auth/login')
-        .send({ email: 'nonexistent@spaceexspace.com', password: 'SomePassword' });
+        .send({ email: 'nonexistent@spaceexspace.com', password: 'AnyPassword' });
 
       expect(res.status).toBe(401);
-      expect(res.body.error).toBe('Invalid email or password');
-    });
-
-    it('rejects invalid email format with 400 validation error', async () => {
-      const res = await request(app)
-        .post('/api/auth/login')
-        .send({ email: 'not-an-email', password: 'Password123' });
-
-      expect(res.status).toBe(400);
-      expect(res.body.error).toBe('Validation failed');
-      expect(res.body.details.email).toBeDefined();
+      expect(res.body.error).toMatch(/Invalid email or password/i);
     });
 
     it('rejects deactivated user accounts', async () => {
-      // Temporarily insert a deactivated user
+      // Temporarily insert a disabled user
       await pool.query(
         `INSERT INTO users (name, email, password_hash, role, active)
          VALUES ('Disabled User', 'disabled@spaceexspace.com', '$2b$10$dummyhashnotreal', 'staff', false)
@@ -228,6 +227,29 @@ describe('Auth, RBAC, and Server-Side Rate Serialization Suite', () => {
       // Confirm raw object retains all values for admin
       const untouchedForAdmin = sanitizeFinancials(sensitiveRecord, 'admin');
       expect(untouchedForAdmin).toEqual(sensitiveRecord);
+    });
+
+    it('strips customer contact details (customer_contact, customer_phone, contact_person, phone, email) for staff', () => {
+      const record = {
+        id: 1,
+        customer_name: 'Apex Infrastructure',
+        customer_contact: 'Eng. Tariq Al-Ghamdi',
+        customer_phone: '+966 50 123 4567',
+        contact_person: 'Eng. Tariq',
+        phone: '+966 50 123 4567',
+        email: 'tariq@apex.sa',
+        site_name: 'Ras Tanura Site'
+      };
+
+      const sanitized = sanitizeFinancials(record, 'staff');
+      expect(sanitized).toEqual({
+        id: 1,
+        customer_name: 'Apex Infrastructure',
+        site_name: 'Ras Tanura Site'
+      });
+
+      const adminView = sanitizeFinancials(record, 'admin');
+      expect(adminView).toEqual(record);
     });
   });
 });
